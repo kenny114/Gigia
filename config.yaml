@@ -1,0 +1,45 @@
+# ──────────────────────────────────────────────
+#  Giga AI  –  Example configuration
+#  Values here are overridden by env vars with
+#  the same key (upper-cased, prefixed GIGA_).
+# ──────────────────────────────────────────────
+
+llm:
+  provider: openai          # openai | mock
+  model: gpt-4o
+  api_key: ""                # set via env var: GIGA_LLM__API_KEY or OPENAI_API_KEY
+  temperature: 0.2
+  max_tokens: 2048
+  timeout_seconds: 60
+
+database:
+  sqlite_path: "giga_ai.db"
+
+proxies:
+  # One proxy per line:  protocol://user:pass@host:port
+  list:
+    - ""                    # empty = no proxy (direct)
+  rotation_strategy: round_robin   # round_robin | random
+
+retry:
+  max_attempts: 3
+  base_delay_seconds: 2.0
+  backoff_factor: 2.0
+  max_delay_seconds: 30.0
+
+manager_bot:
+  max_concurrent_sub_bots: 5
+  sub_bot_timeout_seconds: 120
+
+sub_bot:
+  default_user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  request_timeout_seconds: 30
+  screenshot_on_error: true
+  screenshot_dir: "screenshots/"
+
+logging:
+  level: INFO               # DEBUG | INFO | WARNING | ERROR
+  format: json              # json | text
+
+event_bus:
+  queue_max_size: 1000

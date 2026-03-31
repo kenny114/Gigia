@@ -1,0 +1,37 @@
+# Core async
+asyncio-throttle==1.0.2
+
+# HTTP + scraping
+aiohttp==3.9.5
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# Selenium / browser automation
+selenium==4.21.0
+undetected-chromedriver==3.5.5
+playwright==1.44.0
+
+# Database
+aiosqlite==0.20.0
+
+# LLM
+openai==1.30.1
+
+# Web API
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# Schemas / validation
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Config
+pyyaml==6.0.1
+python-dotenv==1.0.1
+
+# Structured logging
+python-json-logger==2.0.7
+
+# Utilities
+tenacity==8.3.0
+httpx==0.27.0

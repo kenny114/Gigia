@@ -1,0 +1,423 @@
+"""
+manager_bot.py – Task orchestrator: spawns sub-bots, handles retries, escalates.
+
+Responsibilities
+----------------
+- Execute a single ``Task`` end-to-end.
+- Build ``SubBotInstruction`` objects from Task metadata.
+- Spawn the appropriate sub-bot (scraper / selenium) for each instruction.
+- Retry failed sub-bots with alternative strategies (proxy rotation, etc.).
+- Escalate genuinely unsolvable problems to the LearningBrain via the
+  EventBus ``ESCALATION`` event.
+- Expose a ``get_status()`` snapshot for ExecutionBrain polling.
+
+Usage
+-----
+    manager = ManagerBot(task=task, event_bus=bus, memory=mem, config=cfg)
+    await manager.run()        # usually called by ExecutionBrain
+"""
+
+from __future__ import annotations
+
+import asyncio
+import itertools
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+from giga_ai.messaging.event_bus import EventBus, EventType
+from giga_ai.messaging.message_schemas import (
+    ErrorReport,
+    ErrorType,
+    EscalationReport,
+    ManagerStatus,
+    ManagerStatusEnum,
+    Result,
+    SubBotInstruction,
+    SubBotType,
+    Task,
+)
+from giga_ai.utils.logger import get_logger
+
+
+log = get_logger(__name__)
+
+
+class ManagerBot:
+    """
+    Mid-layer task orchestrator.
+
+    Parameters
+    ----------
+    task:
+        The Task this manager is responsible for completing.
+    event_bus:
+        Shared EventBus.
+    memory:
+        GlobalMemory instance (optional; used for strategy lookup).
+    memory_context:
+        Pre-fetched context dict from GlobalMemory.
+    config:
+        Config override; loaded from singleton if not supplied.
+    on_complete_callback:
+        Optional async callable invoked when the manager finishes.
+        Signature: ``async def cb(manager_id, problem, solution, success_rate)``.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        event_bus: EventBus,
+        memory=None,
+        memory_context: Optional[Dict[str, Any]] = None,
+        config=None,
+        on_complete_callback: Optional[Callable[..., Coroutine]] = None,
+    ) -> None:
+        self.manager_id: str = str(uuid.uuid4())
+        self.task = task
+        self._bus = event_bus
+        self._memory = memory
+        self._memory_context: Dict[str, Any] = memory_context or {}
+        self._on_complete_callback = on_complete_callback
+
+        if config is None:
+            from giga_ai.config import get_config
+            config = get_config()
+        self._config = config
+
+        self._status: ManagerStatusEnum = ManagerStatusEnum.IDLE
+        self._active_sub_bot_count: int = 0
+        self._error_count: int = 0
+        self._last_heartbeat: datetime = datetime.now(timezone.utc)
+        self._results: List[Result] = []
+        self._error_history: List[ErrorReport] = []
+
+        # Proxy rotation (round-robin)
+        self._proxy_cycle = itertools.cycle(
+            [p for p in self._config.proxies.list if p] or [""]
+        )
+
+        self._logger = get_logger(__name__, correlation_id=task.correlation_id)
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """
+        Main execution loop for this manager.
+
+        1. Build sub-bot instructions from the task metadata.
+        2. Spawn sub-bots concurrently (up to the configured limit).
+        3. Retry failures up to ``max_attempts`` times.
+        4. Escalate if exhausted.
+        """
+        self._status = ManagerStatusEnum.RUNNING
+        self._logger.info(
+            "ManagerBot: starting",
+            extra={"manager_id": self.manager_id, "task_id": self.task.task_id},
+        )
+
+        try:
+            instructions = self._build_instructions()
+            results = await self.spawn_sub_bots(instructions)
+            self._results.extend(results)
+            self._status = ManagerStatusEnum.COMPLETED
+            self._logger.info(
+                "ManagerBot: task completed",
+                extra={
+                    "manager_id": self.manager_id,
+                    "task_id": self.task.task_id,
+                    "result_count": len(results),
+                },
+            )
+            if self._on_complete_callback:
+                await self._on_complete_callback(
+                    manager_id=self.manager_id,
+                    problem=self.task.metadata.get("original_problem", ""),
+                    solution=str(results[0].data if results else {}),
+                    success_rate=1.0 if results else 0.0,
+                )
+        except Exception as exc:
+            self._status = ManagerStatusEnum.CRASHED
+            self._logger.error(
+                "ManagerBot: unhandled exception in run()",
+                extra={"manager_id": self.manager_id, "error": str(exc)},
+            )
+            raise
+        finally:
+            self._last_heartbeat = datetime.now(timezone.utc)
+
+    # ------------------------------------------------------------------
+    # Sub-bot spawning
+    # ------------------------------------------------------------------
+
+    async def spawn_sub_bots(
+        self,
+        instructions: List[SubBotInstruction],
+    ) -> List[Result]:
+        """
+        Execute sub-bot instructions concurrently, respecting the concurrency
+        limit from config.
+
+        Parameters
+        ----------
+        instructions:
+            List of instructions to execute.
+
+        Returns
+        -------
+        List[Result]
+            Successful results collected across all instructions.
+        """
+        semaphore = asyncio.Semaphore(self._config.manager_bot.max_concurrent_sub_bots)
+        results: List[Result] = []
+
+        async def _run_one(instruction: SubBotInstruction) -> Optional[Result]:
+            async with semaphore:
+                return await self._execute_with_retry(instruction)
+
+        tasks = [asyncio.create_task(_run_one(inst)) for inst in instructions]
+        self._active_sub_bot_count = len(tasks)
+
+        for coro in asyncio.as_completed(tasks):
+            try:
+                result = await coro
+                if result is not None:
+                    results.append(result)
+                    await self._bus.publish(
+                        EventType.SUB_BOT_RESULT,
+                        payload=result.model_dump(mode="json"),
+                        correlation_id=self.task.correlation_id,
+                    )
+            except Exception as exc:
+                self._error_count += 1
+                self._logger.error(
+                    "ManagerBot: unexpected error from sub-bot coroutine",
+                    extra={"error": str(exc)},
+                )
+            finally:
+                self._active_sub_bot_count = max(0, self._active_sub_bot_count - 1)
+
+        self._last_heartbeat = datetime.now(timezone.utc)
+        return results
+
+    # ------------------------------------------------------------------
+    # Failure handling
+    # ------------------------------------------------------------------
+
+    async def handle_sub_bot_failure(
+        self,
+        error: "SubBotError",  # type: ignore[name-defined]
+        instruction: SubBotInstruction,
+    ) -> Optional[Result]:
+        """
+        Attempt recovery after a sub-bot failure.
+
+        Strategy:
+        - ``CaptchaDetected`` → rotate proxy, retry
+        - ``HTTP404``         → mark as non-retryable
+        - ``Timeout``         → retry immediately
+        - Others              → retry up to max_attempts
+
+        Parameters
+        ----------
+        error:
+            The SubBotError describing what went wrong.
+        instruction:
+            The original instruction that failed.
+
+        Returns
+        -------
+        Optional[Result]
+            A successful Result if recovery succeeded, otherwise None.
+        """
+        self._error_history.append(error.error_report)
+        self._error_count += 1
+
+        err_type = error.error_report.error_type
+
+        # Non-retryable errors
+        if err_type == ErrorType.HTTP_404 or not error.error_report.retryable:
+            self._logger.warning(
+                "ManagerBot: non-retryable error – skipping instruction",
+                extra={
+                    "instruction_id": instruction.instruction_id,
+                    "error_type": err_type,
+                },
+            )
+            return None
+
+        # Rotate proxy for captcha / 403 blocks
+        if err_type in (ErrorType.CAPTCHA_DETECTED, ErrorType.HTTP_403):
+            new_proxy = next(self._proxy_cycle)
+            instruction = instruction.model_copy(
+                update={"parameters": {**instruction.parameters, "proxy": new_proxy}}
+            )
+            self._logger.info(
+                "ManagerBot: rotated proxy after block",
+                extra={"error_type": err_type, "new_proxy": new_proxy or "(direct)"},
+            )
+
+        # Retry
+        return await self._run_sub_bot(instruction)
+
+    async def escalate(self, problem: str) -> None:
+        """
+        Send an EscalationReport to the LearningBrain via the event bus.
+
+        Parameters
+        ----------
+        problem:
+            Natural-language description of the unsolvable problem.
+        """
+        report = EscalationReport(
+            manager_id=self.manager_id,
+            task_id=self.task.task_id,
+            problem=problem,
+            context={
+                "task_title": self.task.title,
+                "task_description": self.task.description,
+                **self._memory_context,
+            },
+            error_history=list(self._error_history),
+            correlation_id=self.task.correlation_id,
+        )
+
+        self._logger.warning(
+            "ManagerBot: escalating problem",
+            extra={"manager_id": self.manager_id, "problem": problem[:120]},
+        )
+
+        await self._bus.publish(
+            EventType.ESCALATION,
+            payload=report.model_dump(mode="json"),
+            correlation_id=self.task.correlation_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    def get_status(self) -> ManagerStatus:
+        """Return a snapshot of this manager's current state."""
+        return ManagerStatus(
+            manager_id=self.manager_id,
+            task_id=self.task.task_id,
+            status=self._status,
+            active_sub_bots=self._active_sub_bot_count,
+            last_heartbeat=self._last_heartbeat,
+            error_count=self._error_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _build_instructions(self) -> List[SubBotInstruction]:
+        """
+        Build SubBotInstruction objects from the task's metadata.
+
+        The Task's ``metadata`` dict may contain:
+          - ``instructions``:  List[dict] of raw instruction payloads
+          - ``url``:           Single URL shorthand (produces one instruction)
+
+        Falls back to a single generic instruction if nothing is found.
+        """
+        raw_instructions = self.task.metadata.get("instructions", [])
+
+        if not raw_instructions:
+            # Single-URL shorthand
+            url = self.task.metadata.get("url")
+            if url:
+                raw_instructions = [{"url": url}]
+            else:
+                raw_instructions = [{"description": self.task.description}]
+
+        result = []
+        for raw in raw_instructions:
+            proxy = next(self._proxy_cycle)
+            params = {**raw, "proxy": proxy}
+            inst = SubBotInstruction(
+                task_id=self.task.task_id,
+                sub_bot_type=self.task.sub_bot_type,
+                parameters=params,
+                correlation_id=self.task.correlation_id,
+                timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,
+            )
+            result.append(inst)
+
+        return result
+
+    async def _execute_with_retry(self, instruction: SubBotInstruction) -> Optional[Result]:
+        """
+        Try executing *instruction* up to ``max_attempts`` times.
+
+        Returns the first successful Result, or None if all attempts fail
+        (after which ``escalate`` is called).
+        """
+        max_attempts = self._config.retry.max_attempts
+        delay = self._config.retry.base_delay_seconds
+
+        for attempt in range(1, max_attempts + 1):
+            result_or_error = await self._run_sub_bot(instruction)
+
+            if isinstance(result_or_error, Result):
+                return result_or_error
+
+            # It's an ErrorReport
+            from giga_ai.messaging.message_schemas import SubBotError as _SubBotError
+            error = _SubBotError(
+                error_report=result_or_error,
+                attempt_number=attempt,
+                instruction=instruction,
+            )
+
+            if attempt < max_attempts:
+                recovered = await self.handle_sub_bot_failure(error, instruction)
+                if recovered is not None:
+                    return recovered
+                wait = min(delay * (self._config.retry.backoff_factor ** (attempt - 1)),
+                           self._config.retry.max_delay_seconds)
+                self._logger.info(
+                    "ManagerBot: waiting before retry",
+                    extra={"attempt": attempt, "wait": wait},
+                )
+                await asyncio.sleep(wait)
+            else:
+                self._logger.warning(
+                    "ManagerBot: all retry attempts exhausted",
+                    extra={"instruction_id": instruction.instruction_id, "attempts": attempt},
+                )
+                await self.escalate(
+                    f"Sub-bot failed after {attempt} attempts: "
+                    f"{result_or_error.error_type} – {result_or_error.message}"
+                )
+                return None
+
+        return None
+
+    async def _run_sub_bot(
+        self, instruction: SubBotInstruction
+    ) -> "Result | ErrorReport":  # type: ignore[name-defined]
+        """Instantiate the correct sub-bot type and execute the instruction."""
+        from giga_ai.sub_bot.bot_factory import BotFactory as SubBotFactory  # type: ignore
+        sub_bot = SubBotFactory.create(instruction.sub_bot_type, self._config)
+        self._active_sub_bot_count += 1
+        try:
+            result = await asyncio.wait_for(
+                sub_bot.execute(instruction),
+                timeout=instruction.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            result = ErrorReport(
+                instruction_id=instruction.instruction_id,
+                task_id=instruction.task_id,
+                error_type=ErrorType.TIMEOUT,
+                message=f"Sub-bot timed out after {instruction.timeout_seconds}s",
+                correlation_id=instruction.correlation_id,
+            )
+        finally:
+            self._active_sub_bot_count = max(0, self._active_sub_bot_count - 1)
+        self._last_heartbeat = datetime.now(timezone.utc)
+        return result
