@@ -254,6 +254,12 @@ class PlanningBrain:
 
         try:
             data = json.loads(raw)
+            # json_object mode returns {"tasks": [...]} — unwrap it
+            if isinstance(data, dict):
+                data = next(
+                    (v for v in data.values() if isinstance(v, list)),
+                    [data],
+                )
         except json.JSONDecodeError as exc:
             log.warning(
                 "PlanningBrain: failed to parse LLM response as JSON – using fallback",

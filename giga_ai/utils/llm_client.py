@@ -112,6 +112,7 @@ class OpenAILLMClient(LLMClient):
                 messages=messages,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
+                response_format={"type": "json_object"},
             )
         except Exception as exc:
             log.error("OpenAI API call failed", extra={"error": type(exc).__name__, "detail": str(exc)})
