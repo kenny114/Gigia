@@ -247,6 +247,10 @@ class PlanningBrain:
         raw = re.sub(r"//[^\n]*", "", raw)
         # Strip trailing commas before ] or } (common GPT mistake)
         raw = re.sub(r",\s*([}\]])", r"\1", raw)
+        # Replace literal control characters inside strings (newlines, tabs, etc.)
+        raw = re.sub(r'[\x00-\x09\x0b\x0c\x0e-\x1f]', ' ', raw)
+        # Replace unescaped literal newlines inside JSON strings
+        raw = re.sub(r'(?<!\\)\n', ' ', raw)
 
         try:
             data = json.loads(raw)
