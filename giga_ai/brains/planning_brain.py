@@ -233,6 +233,20 @@ class PlanningBrain:
                 line for line in lines
                 if not line.strip().startswith("```")
             )
+            raw = raw.strip()
+
+        # Extract the JSON array if the model wrapped it in prose
+        if not raw.startswith("["):
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start != -1 and end != -1:
+                raw = raw[start:end + 1]
+
+        # Strip JavaScript-style // comments (GPT sometimes adds them)
+        import re
+        raw = re.sub(r"//[^\n]*", "", raw)
+        # Strip trailing commas before ] or } (common GPT mistake)
+        raw = re.sub(r",\s*([}\]])", r"\1", raw)
 
         try:
             data = json.loads(raw)
