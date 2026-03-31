@@ -51,6 +51,13 @@ Each task must have the following fields:
   sub_bot_type (string) – one of: "scraper", "selenium", "generic"
   priority     (integer) – execution order, lower = higher priority (start at 1)
   dependencies (array of task_id strings) – tasks that must complete before this one
+  metadata     (object) – REQUIRED for scraper/selenium tasks; must include:
+                  "url": the full URL to scrape (e.g. "https://www.google.com/search?q=...")
+                  "css_selectors": object mapping field names to CSS selectors (optional)
+                  For search-based goals use Google: "https://www.google.com/search?q=ENCODED+QUERY"
+
+IMPORTANT: Every scraper or selenium task MUST include a "url" inside metadata.
+Without a url the task will fail immediately. Use real, publicly accessible URLs.
 
 Respond with ONLY a valid JSON array of task objects. No prose, no markdown fences."""
 
