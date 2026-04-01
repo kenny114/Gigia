@@ -51,16 +51,35 @@ Each task object must have these fields:
   task_id      (string)  – unique id like "task-1", "task-2", etc.
   title        (string)  – short task title
   description  (string)  – what to do, single line, no newlines
-  sub_bot_type (string)  – one of: "scraper", "selenium", "generic"
+  sub_bot_type (string)  – one of: "scraper", "browser"
   priority     (integer) – execution order, 1 = highest priority
   dependencies (array)   – list of task_id strings that must finish first
-  metadata     (object)  – REQUIRED; must include "url": a full public URL to fetch.
-                           For search goals use: "https://www.google.com/search?q=your+encoded+query"
-                           For directory goals use relevant directory sites.
+  metadata     (object)  – REQUIRED; see rules below
 
-RULES:
-- Every scraper/selenium task MUST have metadata.url set to a real, public URL.
-- Never leave metadata empty or omit the url field.
+SUB_BOT_TYPE SELECTION RULES (follow exactly):
+- Use "browser" for: Google Maps, Google Search, Yelp, TripAdvisor, any site that loads content via JavaScript, single-page apps, sites that require scrolling to reveal results.
+- Use "scraper" for: Wikipedia, plain HTML directory listings, static informational pages, REST APIs that return HTML.
+- When in doubt, use "browser".
+
+METADATA RULES:
+- metadata MUST always include "url": a real, fully-qualified public URL.
+- For local/maps/business searches: "url": "https://www.google.com/maps/search/your+encoded+query"
+- For web searches: "url": "https://www.google.com/search?q=your+encoded+query"
+- For static pages: "url": the direct page URL
+
+ADDITIONAL METADATA FOR "browser" TASKS:
+- "wait_for" (string): CSS selector that appears when results are loaded. Examples:
+    Google Maps: "div[role='feed']"
+    Google Search: "#search"
+    Yelp: "[data-testid='serp-ia-card']"
+- "scroll_feed" (boolean): true if the page needs scrolling to reveal more results
+- "scroll_count" (integer): how many scroll steps (default 4 for Maps/Yelp)
+- "css_selectors" (object): field_name → CSS selector for data extraction. Examples:
+    Google Maps names: "div[role='feed'] a[aria-label]"
+    Google Maps links: "div[role='feed'] a[href*='maps']"
+
+ABSOLUTE RULES:
+- Every task MUST have metadata.url set to a real, public URL. Never omit it.
 - description must be a single line string with no newline characters.
 - Always produce 2-5 tasks."""
 
@@ -76,7 +95,12 @@ _REPLAN_SYSTEM_PROMPT = """You are a replanning engine for an autonomous bot sys
 A task has failed. Your job is to produce an alternative set of tasks that achieve
 the same objective using a different approach.
 
-Respond with ONLY a valid JSON array of task objects (same schema as before)."""
+Respond with a JSON object in this exact format:
+{"tasks": [ ... array of task objects ... ]}
+
+Use the same task schema and sub_bot_type rules as the decompose prompt.
+If the failure was a bot-detection/captcha, try a different URL or site.
+If the failure was a parse error, adjust the css_selectors or use a different approach."""
 
 _REPLAN_USER_TEMPLATE = """Original failed task:
   Title: {task_title}
@@ -283,9 +307,10 @@ class PlanningBrain:
                     "task_id": "fallback-1",
                     "title": "Fallback task",
                     "description": "Could not parse LLM decomposition; manual intervention required.",
-                    "sub_bot_type": "generic",
+                    "sub_bot_type": "browser",
                     "priority": 1,
                     "dependencies": [],
+                    "metadata": {},
                 }
             ]
 

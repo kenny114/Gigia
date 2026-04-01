@@ -42,6 +42,7 @@ class TaskStatus(str, Enum):
 class SubBotType(str, Enum):
     SCRAPER = "scraper"
     SELENIUM = "selenium"
+    BROWSER = "browser"
     GENERIC = "generic"
 
 

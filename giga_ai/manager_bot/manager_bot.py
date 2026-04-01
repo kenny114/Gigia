@@ -25,6 +25,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
+from urllib.parse import urlparse
+
 from giga_ai.messaging.event_bus import EventBus, EventType
 from giga_ai.messaging.message_schemas import (
     ErrorReport,
@@ -120,6 +122,13 @@ class ManagerBot:
 
         try:
             instructions = self._build_instructions()
+            if not instructions:
+                await self.escalate(
+                    f"Task '{self.task.task_id}' produced no executable instructions "
+                    f"(missing metadata.url for sub_bot_type={self.task.sub_bot_type})"
+                )
+                self._status = ManagerStatusEnum.COMPLETED
+                return
             results = await self.spawn_sub_bots(instructions)
             self._results.extend(results)
             self._status = ManagerStatusEnum.COMPLETED
@@ -314,6 +323,35 @@ class ManagerBot:
     # Internals
     # ------------------------------------------------------------------
 
+    # Domains/URL patterns that require a full browser (JS rendering).
+    # Any URL whose host+path contains one of these keys gets upgraded to BROWSER.
+    _BROWSER_URL_PATTERNS = (
+        "maps.google.com",
+        "google.com/maps",
+        "google.com/search",
+        "yelp.com/search",
+        "yelp.com/biz",
+        "tripadvisor.com",
+        "facebook.com",
+        "instagram.com",
+        "linkedin.com",
+        "zillow.com",
+        "redfin.com",
+        "realtor.com",
+        "doordash.com",
+        "ubereats.com",
+    )
+
+    @staticmethod
+    def _needs_browser(url: str) -> bool:
+        """Return True if *url* requires a full browser (JS rendering)."""
+        try:
+            parsed = urlparse(url)
+            hostpath = (parsed.netloc + parsed.path).lower()
+            return any(pat in hostpath for pat in ManagerBot._BROWSER_URL_PATTERNS)
+        except Exception:
+            return False
+
     def _build_instructions(self) -> List[SubBotInstruction]:
         """
         Build SubBotInstruction objects from the task's metadata.
@@ -321,26 +359,52 @@ class ManagerBot:
         The Task's ``metadata`` dict may contain:
           - ``instructions``:  List[dict] of raw instruction payloads
           - ``url``:           Single URL shorthand (produces one instruction)
+          - Any browser parameters (wait_for, css_selectors, scroll_feed, etc.)
+            that are promoted directly into the instruction parameters.
 
-        Falls back to a single generic instruction if nothing is found.
+        URL-based auto-upgrade:
+          If the URL matches a known JS-heavy domain (Google Maps, Yelp, etc.)
+          the sub_bot_type is automatically upgraded to BROWSER regardless of
+          what the LLM planned, and domain-specific defaults are merged in.
+
+        Returns an empty list when no URL is available for a scraper/browser
+        task (run() will escalate cleanly).
         """
         raw_instructions = self.task.metadata.get("instructions", [])
 
         if not raw_instructions:
-            # Single-URL shorthand
             url = self.task.metadata.get("url")
             if url:
-                raw_instructions = [{"url": url}]
+                # Promote all metadata fields into the instruction params
+                # so wait_for, css_selectors, scroll_feed etc. flow through.
+                raw_instructions = [{
+                    k: v for k, v in self.task.metadata.items()
+                    if k != "instructions"
+                }]
             else:
-                raw_instructions = [{"description": self.task.description}]
+                # No URL — cannot execute a scraper/browser task
+                return []
 
         result = []
         for raw in raw_instructions:
+            url = raw.get("url", "")
             proxy = next(self._proxy_cycle)
+
+            # Determine the actual sub_bot_type to use
+            sub_bot_type = self.task.sub_bot_type
+
+            if url and self._needs_browser(url):
+                # Force BROWSER for JS-heavy URLs regardless of LLM choice
+                sub_bot_type = SubBotType.BROWSER
+                self._logger.info(
+                    "ManagerBot: auto-upgraded sub_bot_type to BROWSER",
+                    extra={"url": url, "original_type": self.task.sub_bot_type},
+                )
+
             params = {**raw, "proxy": proxy}
             inst = SubBotInstruction(
                 task_id=self.task.task_id,
-                sub_bot_type=self.task.sub_bot_type,
+                sub_bot_type=sub_bot_type,
                 parameters=params,
                 correlation_id=self.task.correlation_id,
                 timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,

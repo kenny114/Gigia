@@ -27,7 +27,7 @@ class LLMConfig:
     model: str = "gpt-4o"
     api_key: str = ""
     temperature: float = 0.2
-    max_tokens: int = 2048
+    max_tokens: int = 4096
     timeout_seconds: int = 60
 
 

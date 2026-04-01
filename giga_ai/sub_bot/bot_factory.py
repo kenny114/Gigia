@@ -3,6 +3,12 @@ bot_factory.py – Sub-bot factory (SubBotType → SubBot instance).
 
 This is separate from manager_bot/bot_factory.py which creates ManagerBots.
 manager_bot.py imports this via ``giga_ai.sub_bot.bot_factory``.
+
+Routing:
+  SCRAPER  → ScraperSubBot   (aiohttp + BeautifulSoup, fast, static pages)
+  SELENIUM → SeleniumSubBot  (undetected-chromedriver or Playwright, legacy)
+  BROWSER  → BrowserSubBot   (Playwright with stealth, JS-heavy / Maps / SPAs)
+  GENERIC  → BrowserSubBot   (safe default — handles anything a plain scraper can't)
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ class BotFactory:
         ----------
         sub_bot_type:
             One of ``SubBotType.SCRAPER``, ``SubBotType.SELENIUM``,
-            ``SubBotType.GENERIC``.
+            ``SubBotType.BROWSER``, ``SubBotType.GENERIC``.
         config:
             Config override; each sub-bot falls back to the singleton.
 
@@ -32,10 +38,14 @@ class BotFactory:
         SubBot
             A ready-to-use sub-bot instance.
         """
+        if sub_bot_type == SubBotType.SCRAPER:
+            from giga_ai.sub_bot.scraper_sub_bot import ScraperSubBot
+            return ScraperSubBot(config=config)
+
         if sub_bot_type == SubBotType.SELENIUM:
             from giga_ai.sub_bot.selenium_sub_bot import SeleniumSubBot
             return SeleniumSubBot(config=config)
 
-        # Default (SCRAPER + GENERIC) – use the lightweight HTTP scraper
-        from giga_ai.sub_bot.scraper_sub_bot import ScraperSubBot
-        return ScraperSubBot(config=config)
+        # BROWSER and GENERIC both use BrowserSubBot (full Playwright stack)
+        from giga_ai.sub_bot.browser_sub_bot import BrowserSubBot
+        return BrowserSubBot(config=config)
