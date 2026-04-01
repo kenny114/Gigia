@@ -238,6 +238,16 @@ class PlanningBrain:
             )
             raw = raw.strip()
 
+        # Unwrap {"tasks": [...]} or any top-level object wrapping an array
+        if raw.startswith("{"):
+            try:
+                obj = json.loads(raw)
+                arr = next((v for v in obj.values() if isinstance(v, list)), None)
+                if arr is not None:
+                    raw = json.dumps(arr)
+            except json.JSONDecodeError:
+                pass  # fall through to array-extraction below
+
         # Extract the JSON array if the model wrapped it in prose
         if not raw.startswith("["):
             start = raw.find("[")
