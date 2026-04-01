@@ -44,22 +44,25 @@ log = get_logger(__name__)
 _DECOMPOSE_SYSTEM_PROMPT = """You are a planning engine for an autonomous bot system.
 Your job is to break down a high-level goal into a list of discrete, executable tasks.
 
-Each task must have the following fields:
-  task_id      (string) – a unique identifier like "task-1", "task-2", etc.
-  title        (string) – short task title
-  description  (string) – detailed description of what to do
-  sub_bot_type (string) – one of: "scraper", "selenium", "generic"
-  priority     (integer) – execution order, lower = higher priority (start at 1)
-  dependencies (array of task_id strings) – tasks that must complete before this one
-  metadata     (object) – REQUIRED for scraper/selenium tasks; must include:
-                  "url": the full URL to scrape (e.g. "https://www.google.com/search?q=...")
-                  "css_selectors": object mapping field names to CSS selectors (optional)
-                  For search-based goals use Google: "https://www.google.com/search?q=ENCODED+QUERY"
+You must respond with a JSON object in this exact format:
+{"tasks": [ ... array of task objects ... ]}
 
-IMPORTANT: Every scraper or selenium task MUST include a "url" inside metadata.
-Without a url the task will fail immediately. Use real, publicly accessible URLs.
+Each task object must have these fields:
+  task_id      (string)  – unique id like "task-1", "task-2", etc.
+  title        (string)  – short task title
+  description  (string)  – what to do, single line, no newlines
+  sub_bot_type (string)  – one of: "scraper", "selenium", "generic"
+  priority     (integer) – execution order, 1 = highest priority
+  dependencies (array)   – list of task_id strings that must finish first
+  metadata     (object)  – REQUIRED; must include "url": a full public URL to fetch.
+                           For search goals use: "https://www.google.com/search?q=your+encoded+query"
+                           For directory goals use relevant directory sites.
 
-Respond with ONLY a valid JSON array of task objects. No prose, no markdown fences."""
+RULES:
+- Every scraper/selenium task MUST have metadata.url set to a real, public URL.
+- Never leave metadata empty or omit the url field.
+- description must be a single line string with no newline characters.
+- Always produce 2-5 tasks."""
 
 _DECOMPOSE_USER_TEMPLATE = """Goal: {goal}
 
