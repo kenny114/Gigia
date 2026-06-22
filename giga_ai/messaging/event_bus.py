@@ -64,6 +64,8 @@ class EventType(str, Enum):
     HEALTH_UPDATE = "HEALTH_UPDATE"
     MANAGER_CRASHED = "MANAGER_CRASHED"
     MANAGER_COMPLETED = "MANAGER_COMPLETED"
+    SKILL_EXECUTED = "SKILL_EXECUTED"    # SkillSubBot ran — SkillBrain updates profile
+    GOAL_COMPLETED = "GOAL_COMPLETED"    # all tasks for a goal done — SkillBrain records interactions
     ALL = "*"               # wildcard – receives every event
 
 

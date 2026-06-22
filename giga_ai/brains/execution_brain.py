@@ -66,6 +66,10 @@ class ExecutionBrain:
         self._managers: Dict[str, "ManagerBot"] = {}  # type: ignore[name-defined]
         # manager_id → asyncio.Task running manager.run()
         self._manager_tasks: Dict[str, asyncio.Task] = {}
+        # goal_id → set of manager_ids still running (for GOAL_COMPLETED tracking)
+        self._goal_managers: Dict[str, set] = {}
+        # goal_id → goal description (for SkillBrain context)
+        self._goal_descriptions: Dict[str, str] = {}
 
         if config is None:
             from giga_ai.config import get_config
@@ -138,6 +142,13 @@ class ExecutionBrain:
         )
 
         self._managers[manager.manager_id] = manager
+
+        # Track which goal this manager belongs to
+        goal_id = task.goal_id
+        if goal_id not in self._goal_managers:
+            self._goal_managers[goal_id] = set()
+            self._goal_descriptions[goal_id] = task.metadata.get("goal_description", task.title)
+        self._goal_managers[goal_id].add(manager.manager_id)
 
         # Run the manager in a background asyncio task
         t = asyncio.create_task(
@@ -221,10 +232,33 @@ class ExecutionBrain:
                         payload={"manager_id": mid},
                     )
 
-        # Retire finished / crashed managers
+        # Retire finished / crashed managers and check for goal completion
         for mid in crashed_ids + completed_ids:
-            self._managers.pop(mid, None)
+            manager = self._managers.pop(mid, None)
             self._manager_tasks.pop(mid, None)
+
+            # Check if all managers for a goal are now done
+            if manager:
+                goal_id = manager.task.goal_id
+                if goal_id in self._goal_managers:
+                    self._goal_managers[goal_id].discard(mid)
+                    if not self._goal_managers[goal_id]:
+                        # All tasks for this goal have finished
+                        self._goal_managers.pop(goal_id, None)
+                        goal_desc = self._goal_descriptions.pop(goal_id, "")
+                        success = goal_id not in [m.task.goal_id for m in self._managers.values()]
+                        await self._bus.publish(
+                            EventType.GOAL_COMPLETED,
+                            payload={
+                                "goal_id": goal_id,
+                                "goal_description": goal_desc,
+                                "success": True,
+                            },
+                        )
+                        log.info(
+                            "ExecutionBrain: goal completed",
+                            extra={"goal_id": goal_id},
+                        )
 
         return statuses
 

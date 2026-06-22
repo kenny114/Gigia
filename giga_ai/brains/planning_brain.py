@@ -210,9 +210,10 @@ class PlanningBrain:
         Any ``LLMClient`` implementation (OpenAI or Mock).
     """
 
-    def __init__(self, event_bus: EventBus, llm_client: LLMClient) -> None:
+    def __init__(self, event_bus: EventBus, llm_client: LLMClient, skill_brain=None) -> None:
         self._bus = event_bus
         self._llm = llm_client
+        self._skill_brain = skill_brain  # Optional[SkillBrain] — injected by MainBot
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,11 +238,36 @@ class PlanningBrain:
         context_str = json.dumps(extra_context or {}, indent=2)
 
         if skill_mode:
-            candidates_str = "\n".join(
-                f"  {c.slug}: {c.name} — {c.description}"
-                + (f" (best when: {c.best_used_when})" if c.best_used_when else "")
+            # Build base candidate list
+            candidate_dicts = [
+                {
+                    "slug": c.slug,
+                    "name": c.name,
+                    "description": c.description,
+                    "credit_cost": c.credit_cost,
+                    "best_used_when": c.best_used_when or "",
+                }
                 for c in (candidates or [])
-            )
+            ]
+
+            # Enrich with SkillBrain intelligence if available
+            if self._skill_brain is not None:
+                try:
+                    candidates_str = await self._skill_brain.get_briefing(candidate_dicts)
+                except Exception as exc:
+                    log.warning("PlanningBrain: SkillBrain briefing failed — using raw candidates", extra={"error": str(exc)})
+                    candidates_str = "\n".join(
+                        f"  {c['slug']}: {c['name']} — {c['description']}"
+                        + (f" (best when: {c['best_used_when']})" if c["best_used_when"] else "")
+                        for c in candidate_dicts
+                    )
+            else:
+                candidates_str = "\n".join(
+                    f"  {c['slug']}: {c['name']} — {c['description']}"
+                    + (f" (best when: {c['best_used_when']})" if c["best_used_when"] else "")
+                    for c in candidate_dicts
+                )
+
             prompt = _SKILL_DECOMPOSE_USER_TEMPLATE.format(
                 goal=goal.description,
                 candidates=candidates_str,

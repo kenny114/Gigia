@@ -141,6 +141,23 @@ class ManagerBot:
                     "result_count": len(results),
                 },
             )
+            # Notify SkillBrain after every SKILL task so it can learn
+            if self.task.sub_bot_type == SubBotType.SKILL and results:
+                slug = self.task.skill_slug or self.task.metadata.get("skill_slug", "")
+                result_keys = list(results[0].data.keys()) if results else []
+                await self._bus.publish(
+                    EventType.SKILL_EXECUTED,
+                    payload={
+                        "slug": slug,
+                        "description": self.task.description,
+                        "goal_id": self.task.goal_id,
+                        "goal_description": self.task.metadata.get("goal_description", self.task.title),
+                        "result_keys": result_keys,
+                        "success": True,
+                        "credits": results[0].data.get("credits_charged", 0),
+                    },
+                    correlation_id=self.task.correlation_id,
+                )
             if self._on_complete_callback:
                 await self._on_complete_callback(
                     manager_id=self.manager_id,
@@ -304,6 +321,24 @@ class ManagerBot:
             payload=report.model_dump(mode="json"),
             correlation_id=self.task.correlation_id,
         )
+
+        # Tell SkillBrain this skill failed so reliability scores stay accurate
+        if self.task.sub_bot_type == SubBotType.SKILL:
+            slug = self.task.skill_slug or self.task.metadata.get("skill_slug", "")
+            if slug:
+                await self._bus.publish(
+                    EventType.SKILL_EXECUTED,
+                    payload={
+                        "slug": slug,
+                        "description": self.task.description,
+                        "goal_id": self.task.goal_id,
+                        "goal_description": self.task.metadata.get("goal_description", self.task.title),
+                        "result_keys": [],
+                        "success": False,
+                        "credits": 0,
+                    },
+                    correlation_id=self.task.correlation_id,
+                )
 
     # ------------------------------------------------------------------
     # Status

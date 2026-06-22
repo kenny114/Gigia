@@ -54,8 +54,10 @@ from giga_ai.brains.execution_brain import ExecutionBrain
 from giga_ai.brains.learning_brain import LearningBrain
 from giga_ai.brains.perception_brain import PerceptionBrain
 from giga_ai.brains.planning_brain import PlanningBrain
+from giga_ai.brains.skill_brain import SkillBrain
 from giga_ai.config import load_config
 from giga_ai.memory.global_memory import GlobalMemory
+from giga_ai.memory.skill_memory import SkillMemory
 from giga_ai.messaging.event_bus import EventBus, EventType
 from giga_ai.messaging.message_schemas import (
     GatewayCallback,
@@ -92,22 +94,28 @@ class MainBot:
         # ── Shared infrastructure ───────────────────────────────────────────
         self.bus = EventBus()
         self.memory = GlobalMemory(self.config.database.sqlite_path)
+        self.skill_memory = SkillMemory(self.config.database.sqlite_path)
         self.llm = get_llm_client(self.config)
 
-        # ── Four brains ─────────────────────────────────────────────────────
+        # ── Five brains ─────────────────────────────────────────────────────
         self.perception = PerceptionBrain(
             event_bus=self.bus,
-            health_poll_interval=10.0,   # seconds between health checks
+            health_poll_interval=10.0,
+        )
+        self.skill_brain = SkillBrain(
+            event_bus=self.bus,
+            skill_memory=self.skill_memory,
         )
         self.planning = PlanningBrain(
             event_bus=self.bus,
             llm_client=self.llm,
+            skill_brain=self.skill_brain,
         )
         self.execution = ExecutionBrain(
             event_bus=self.bus,
             memory=self.memory,
             config=self.config,
-            monitor_interval=5.0,        # seconds between manager health polls
+            monitor_interval=5.0,
         )
         self.learning = LearningBrain(
             event_bus=self.bus,
@@ -135,11 +143,13 @@ class MainBot:
         """Initialise memory, start all brains, and start event listeners."""
         log.info("MainBot: starting up")
 
-        # Init DB
+        # Init DBs
         await self.memory.init()
+        await self.skill_memory.init()
 
         # Start brains
         await self.perception.start()
+        await self.skill_brain.start()
         await self.execution.start()
         await self.learning.start()
         # PlanningBrain has no background loop — it's called on demand
@@ -172,6 +182,7 @@ class MainBot:
                     pass
 
         await self.perception.stop()
+        await self.skill_brain.stop()
         await self.execution.stop()
         await self.learning.stop()
         await self.bus.shutdown()

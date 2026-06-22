@@ -338,3 +338,10 @@ async def get_results(limit: int = 100):
         count=len(rows),
         results=[ResultItem(**r) for r in rows],
     )
+
+
+@app.get("/skills", tags=["brain"])
+async def get_skills():
+    """Return all skill profiles SkillBrain has learned from real executions."""
+    profiles = await _bot.skill_memory.get_all_profiles()
+    return {"count": len(profiles), "skills": profiles}
