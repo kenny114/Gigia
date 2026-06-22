@@ -79,6 +79,14 @@ class EventBusConfig:
     queue_max_size: int = 1000
 
 
+@dataclass
+class GatewayConfig:
+    # almcp gateway base URL — set via env GIGA_GATEWAY__BASE_URL
+    base_url: str = ""
+    # Shared secret used by /orchestrate to verify requests from the gateway
+    shared_secret: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Root config
 # ---------------------------------------------------------------------------
@@ -93,6 +101,7 @@ class Config:
     sub_bot: SubBotConfig = field(default_factory=SubBotConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     event_bus: EventBusConfig = field(default_factory=EventBusConfig)
+    gateway: GatewayConfig = field(default_factory=GatewayConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +149,7 @@ def _apply_dict_to_config(cfg: Config, data: dict) -> None:
         "sub_bot": ("sub_bot", SubBotConfig),
         "logging": ("logging", LoggingConfig),
         "event_bus": ("event_bus", EventBusConfig),
+        "gateway": ("gateway", GatewayConfig),
     }
     for section, (attr, klass) in section_map.items():
         if section in data:

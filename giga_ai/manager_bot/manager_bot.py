@@ -370,6 +370,29 @@ class ManagerBot:
         Returns an empty list when no URL is available for a scraper/browser
         task (run() will escalate cleanly).
         """
+        # Skill tasks don't need a URL — they call back to the gateway.
+        if self.task.sub_bot_type == SubBotType.SKILL:
+            slug = self.task.skill_slug or self.task.metadata.get("skill_slug")
+            if not slug:
+                self._logger.warning(
+                    "ManagerBot: SKILL task has no skill_slug — escalating",
+                    extra={"task_id": self.task.task_id},
+                )
+                return []
+            return [SubBotInstruction(
+                task_id=self.task.task_id,
+                sub_bot_type=SubBotType.SKILL,
+                parameters={
+                    "execute_url": self.task.metadata["execute_url"],
+                    "token": self.task.metadata["token"],
+                    "run_id": self.task.metadata.get("run_id", self.task.goal_id),
+                    "skill_slug": slug,
+                    "args": self.task.metadata.get("args") or {},
+                },
+                correlation_id=self.task.correlation_id,
+                timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,
+            )]
+
         raw_instructions = self.task.metadata.get("instructions", [])
 
         if not raw_instructions:

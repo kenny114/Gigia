@@ -23,8 +23,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
+
+from giga_ai.messaging.message_schemas import (
+    GatewayCallback,
+    OrchestrateCandidate,
+    OrchestrateRequest,
+    OrchestrateResponse,
+)
 
 from main_bot import MainBot
 from giga_ai.config import load_config
@@ -268,6 +275,56 @@ async def get_status():
         pending_goals=_bot._pending_goals,
         pending_tasks=_bot._pending_tasks,
     )
+
+
+@app.post("/orchestrate", response_model=OrchestrateResponse, status_code=202, tags=["gateway"])
+async def orchestrate(
+    req: OrchestrateRequest,
+    x_giga_secret: Optional[str] = Header(None, alias="X-Giga-Secret"),
+):
+    """
+    Receive a complex goal from the almcp gateway and orchestrate it.
+
+    The gateway POSTs here when combo.brain.run detects a multi-step goal
+    that benefits from Gigia's DAG execution, retries, and replan-on-failure.
+    Gigia calls back to req.callback.execute_url to run each skill, metered
+    by the gateway. Returns immediately; execution runs asynchronously.
+    """
+    if not _bot or not _bot._running:
+        raise HTTPException(status_code=503, detail="Orchestrator is not running")
+
+    # Verify shared secret if configured
+    config = _bot.config
+    expected_secret = getattr(getattr(config, "gateway", None), "shared_secret", "")
+    if expected_secret and x_giga_secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Invalid X-Giga-Secret")
+
+    # Build the goal metadata so MainBot._on_goal_received_loop passes
+    # candidates + callback through to the PlanningBrain.
+    goal_metadata = {
+        "run_id": req.run_id,
+        "candidates": [c.model_dump() for c in req.candidates],
+        "callback": req.callback.model_dump(),
+        "input": req.input,
+        "max_credits": req.max_credits,
+        "_skill_mode": True,
+    }
+
+    goal = await _bot.submit_goal(req.task, metadata=goal_metadata)
+
+    _goals[goal.goal_id] = {
+        "description": req.task,
+        "submitted_at": goal.submitted_at.isoformat(),
+        "status": "orchestrating",
+        "run_id": req.run_id,
+    }
+
+    log.info(
+        "api: orchestrate accepted",
+        extra={"run_id": req.run_id, "goal_id": goal.goal_id, "task": req.task[:80]},
+    )
+
+    return OrchestrateResponse(run_id=req.run_id, status="accepted")
 
 
 @app.get("/results", response_model=ResultsResponse, tags=["bot"])

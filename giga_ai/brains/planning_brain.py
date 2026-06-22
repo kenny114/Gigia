@@ -30,7 +30,14 @@ import json
 from typing import Any, Dict, List, Optional
 
 from giga_ai.messaging.event_bus import EventBus, EventType
-from giga_ai.messaging.message_schemas import Goal, SubBotType, Task, TaskStatus
+from giga_ai.messaging.message_schemas import (
+    GatewayCallback,
+    Goal,
+    OrchestrateCandidate,
+    SubBotType,
+    Task,
+    TaskStatus,
+)
 from giga_ai.utils.llm_client import LLMClient
 from giga_ai.utils.logger import get_logger
 
@@ -91,6 +98,65 @@ Additional context:
 Decompose this goal into 2–6 concrete tasks."""
 
 
+# ---------------------------------------------------------------------------
+# Skill-mode prompts (used when candidates are provided by the gateway)
+# ---------------------------------------------------------------------------
+
+_SKILL_DECOMPOSE_SYSTEM_PROMPT = """You are a planning engine for an AI skill-execution system.
+Your job is to break a goal into discrete tasks, each executed by ONE skill from the provided catalog.
+
+You must respond with a JSON object in this exact format:
+{"tasks": [ ... array of task objects ... ]}
+
+Each task object must have these fields:
+  task_id      (string)  – unique id like "task-1", "task-2", etc.
+  title        (string)  – short task title
+  description  (string)  – what the skill will do, single line, no newlines
+  sub_bot_type (string)  – always "skill"
+  skill_slug   (string)  – MUST be one of the provided candidate slugs
+  priority     (integer) – execution order, 1 = highest priority
+  dependencies (array)   – list of task_id strings that must complete first (enables parallel execution)
+  metadata     (object)  – skill arguments; use "args" key for the skill's input parameters
+
+RULES:
+- skill_slug MUST be chosen from the CANDIDATE SKILLS list. Never invent a slug.
+- metadata.args should contain the skill's input parameters (e.g. {"url": "...", "query": "..."}).
+- Use dependencies to model data flow: if task-2 needs task-1's output, add "task-1" to task-2's dependencies.
+- Parallel tasks (no shared dependencies) run concurrently — use this to speed up multi-entity goals.
+- Prefer 2–5 tasks. Only add more if the goal genuinely requires it.
+- description must be a single line string with no newline characters."""
+
+_SKILL_DECOMPOSE_USER_TEMPLATE = """Goal: {goal}
+
+CANDIDATE SKILLS (choose skill_slug only from these):
+{candidates}
+
+Additional context:
+{context}
+
+Decompose this goal into tasks. Each task must use exactly one skill from the list above."""
+
+_SKILL_REPLAN_SYSTEM_PROMPT = """You are a replanning engine for an AI skill-execution system.
+A skill task has failed. Produce alternative tasks using different skills from the provided catalog.
+
+Respond with a JSON object: {"tasks": [ ... ]}
+Use the same task schema as the decompose prompt (sub_bot_type: "skill", skill_slug from candidates).
+If the failure was a credit/rate error, try a lighter skill.
+If the failure was unknown_tool or invalid_input, pick a different skill for the same intent."""
+
+_SKILL_REPLAN_USER_TEMPLATE = """Original failed task:
+  Title: {task_title}
+  Description: {task_description}
+  Skill slug: {skill_slug}
+
+Failure context:
+{failure_context}
+
+CANDIDATE SKILLS:
+{candidates}
+
+Produce 1–3 alternative tasks using different skills from the list."""
+
 _REPLAN_SYSTEM_PROMPT = """You are a replanning engine for an autonomous bot system.
 A task has failed. Your job is to produce an alternative set of tasks that achieve
 the same objective using a different approach.
@@ -144,49 +210,69 @@ class PlanningBrain:
         self,
         goal: Goal,
         extra_context: Optional[Dict[str, Any]] = None,
+        candidates: Optional[List[OrchestrateCandidate]] = None,
+        gateway_callback: Optional[GatewayCallback] = None,
     ) -> List[Task]:
         """
-        Decompose *goal* into a list of ``Task`` objects via the LLM.
+        Decompose *goal* into a list of Task objects via the LLM.
 
-        Parameters
-        ----------
-        goal:
-            The Goal to decompose.
-        extra_context:
-            Optional additional context forwarded to the prompt.
-
-        Returns
-        -------
-        List[Task]
-            Ordered list of tasks (sorted by priority).
+        When *candidates* and *gateway_callback* are provided the planner
+        operates in skill-mode: tasks use sub_bot_type="skill" and each maps
+        to one almcp catalog skill. Otherwise it falls back to the original
+        scraper/browser decomposition.
         """
+        skill_mode = bool(candidates and gateway_callback)
         context_str = json.dumps(extra_context or {}, indent=2)
-        prompt = _DECOMPOSE_USER_TEMPLATE.format(
-            goal=goal.description,
-            context=context_str,
-        )
+
+        if skill_mode:
+            candidates_str = "\n".join(
+                f"  {c.slug}: {c.name} — {c.description}"
+                + (f" (best when: {c.best_used_when})" if c.best_used_when else "")
+                for c in (candidates or [])
+            )
+            prompt = _SKILL_DECOMPOSE_USER_TEMPLATE.format(
+                goal=goal.description,
+                candidates=candidates_str,
+                context=context_str,
+            )
+            system_prompt = _SKILL_DECOMPOSE_SYSTEM_PROMPT
+        else:
+            prompt = _DECOMPOSE_USER_TEMPLATE.format(
+                goal=goal.description,
+                context=context_str,
+            )
+            system_prompt = _DECOMPOSE_SYSTEM_PROMPT
 
         log.info(
             "PlanningBrain: decomposing goal",
-            extra={"goal_id": goal.goal_id, "description": goal.description[:80]},
+            extra={
+                "goal_id": goal.goal_id,
+                "description": goal.description[:80],
+                "skill_mode": skill_mode,
+            },
         )
 
         try:
-            raw_response = await self._llm.complete(prompt, system_prompt=_DECOMPOSE_SYSTEM_PROMPT)
+            raw_response = await self._llm.complete(prompt, system_prompt=system_prompt)
         except Exception as exc:
             log.error(
                 "PlanningBrain: LLM call failed",
                 extra={"goal_id": goal.goal_id, "error": type(exc).__name__, "detail": str(exc)},
             )
             raise
-        tasks = self._parse_tasks(raw_response, goal.goal_id, goal.correlation_id)
+
+        tasks = self._parse_tasks(
+            raw_response,
+            goal.goal_id,
+            goal.correlation_id,
+            gateway_callback=gateway_callback,
+        )
 
         log.info(
             "PlanningBrain: goal decomposed",
             extra={"goal_id": goal.goal_id, "task_count": len(tasks)},
         )
 
-        # Emit TASK_CREATED for each task
         for task in tasks:
             await self._emit_task_created(task)
 
@@ -196,40 +282,51 @@ class PlanningBrain:
         self,
         failed_task: Task,
         context: Dict[str, Any],
+        candidates: Optional[List[OrchestrateCandidate]] = None,
+        gateway_callback: Optional[GatewayCallback] = None,
     ) -> List[Task]:
         """
         Produce alternative tasks after *failed_task* failed.
-
-        Parameters
-        ----------
-        failed_task:
-            The task that could not be completed.
-        context:
-            Failure context (error type, error message, attempt history, …).
-
-        Returns
-        -------
-        List[Task]
-            Alternative tasks to attempt instead.
+        Supports both skill-mode (candidates provided) and scraper/browser mode.
         """
         failure_str = json.dumps(context, indent=2)
-        goal_ctx = context.get("goal_description", "")
+        skill_mode = bool(candidates and gateway_callback)
 
-        prompt = _REPLAN_USER_TEMPLATE.format(
-            task_title=failed_task.title,
-            task_description=failed_task.description,
-            sub_bot_type=failed_task.sub_bot_type,
-            failure_context=failure_str,
-            goal_context=goal_ctx,
-        )
+        if skill_mode:
+            candidates_str = "\n".join(
+                f"  {c.slug}: {c.name} — {c.description}" for c in (candidates or [])
+            )
+            prompt = _SKILL_REPLAN_USER_TEMPLATE.format(
+                task_title=failed_task.title,
+                task_description=failed_task.description,
+                skill_slug=failed_task.skill_slug or "unknown",
+                failure_context=failure_str,
+                candidates=candidates_str,
+            )
+            system_prompt = _SKILL_REPLAN_SYSTEM_PROMPT
+        else:
+            goal_ctx = context.get("goal_description", "")
+            prompt = _REPLAN_USER_TEMPLATE.format(
+                task_title=failed_task.title,
+                task_description=failed_task.description,
+                sub_bot_type=failed_task.sub_bot_type,
+                failure_context=failure_str,
+                goal_context=goal_ctx,
+            )
+            system_prompt = _REPLAN_SYSTEM_PROMPT
 
         log.info(
             "PlanningBrain: replanning after failure",
-            extra={"task_id": failed_task.task_id, "context": str(context)[:200]},
+            extra={"task_id": failed_task.task_id, "skill_mode": skill_mode},
         )
 
-        raw_response = await self._llm.complete(prompt, system_prompt=_REPLAN_SYSTEM_PROMPT)
-        new_tasks = self._parse_tasks(raw_response, failed_task.goal_id, failed_task.correlation_id)
+        raw_response = await self._llm.complete(prompt, system_prompt=system_prompt)
+        new_tasks = self._parse_tasks(
+            raw_response,
+            failed_task.goal_id,
+            failed_task.correlation_id,
+            gateway_callback=gateway_callback,
+        )
 
         log.info(
             "PlanningBrain: replan complete",
@@ -245,7 +342,13 @@ class PlanningBrain:
     # Internals
     # ------------------------------------------------------------------
 
-    def _parse_tasks(self, raw: str, goal_id: str, correlation_id: str) -> List[Task]:
+    def _parse_tasks(
+        self,
+        raw: str,
+        goal_id: str,
+        correlation_id: str,
+        gateway_callback: Optional[GatewayCallback] = None,
+    ) -> List[Task]:
         """
         Parse an LLM response into a list of Task objects.
 
@@ -323,17 +426,34 @@ class PlanningBrain:
                 except ValueError:
                     sub_bot_type = SubBotType.GENERIC
 
+                skill_slug = item.get("skill_slug") or None
+                metadata = dict(item.get("metadata") or {})
+
+                # Skill tasks: stamp gateway callback into metadata so
+                # ManagerBot._build_instructions can route to the right endpoint.
+                if sub_bot_type == SubBotType.SKILL and gateway_callback:
+                    metadata.setdefault("execute_url", gateway_callback.execute_url)
+                    metadata.setdefault("token", gateway_callback.token)
+                    metadata.setdefault("run_id", goal_id)
+                    # args may be nested under "args" key or flat in metadata
+                    if "args" not in metadata and skill_slug:
+                        metadata["args"] = {
+                            k: v for k, v in metadata.items()
+                            if k not in {"execute_url", "token", "run_id"}
+                        }
+
                 task = Task(
                     task_id=item.get("task_id", f"task-{len(tasks)+1}"),
                     goal_id=goal_id,
                     title=item.get("title", "Untitled task"),
                     description=item.get("description", ""),
                     sub_bot_type=sub_bot_type,
+                    skill_slug=skill_slug,
                     priority=int(item.get("priority", len(tasks) + 1)),
                     dependencies=item.get("dependencies", []),
                     status=TaskStatus.PENDING,
                     correlation_id=correlation_id,
-                    metadata=item.get("metadata", {}),
+                    metadata=metadata,
                 )
                 tasks.append(task)
             except Exception as exc:

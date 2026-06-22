@@ -46,6 +46,10 @@ class BotFactory:
             from giga_ai.sub_bot.selenium_sub_bot import SeleniumSubBot
             return SeleniumSubBot(config=config)
 
+        if sub_bot_type == SubBotType.SKILL:
+            from giga_ai.sub_bot.skill_sub_bot import SkillSubBot
+            return SkillSubBot(config=config)
+
         # BROWSER and GENERIC both use BrowserSubBot (full Playwright stack)
         from giga_ai.sub_bot.browser_sub_bot import BrowserSubBot
         return BrowserSubBot(config=config)

@@ -44,6 +44,7 @@ class SubBotType(str, Enum):
     SELENIUM = "selenium"
     BROWSER = "browser"
     GENERIC = "generic"
+    SKILL = "skill"     # calls back to the almcp gateway /api/brain/execute
 
 
 class ErrorType(str, Enum):
@@ -105,6 +106,8 @@ class Task(BaseModel):
     title: str
     description: str
     sub_bot_type: SubBotType = SubBotType.SCRAPER
+    # Set when sub_bot_type == SKILL — the almcp catalog slug to execute.
+    skill_slug: Optional[str] = None
     priority: int = 0                          # lower = higher priority
     dependencies: List[str] = Field(default_factory=list)   # list of task_ids
     status: TaskStatus = TaskStatus.PENDING
@@ -224,3 +227,57 @@ class SystemHealth(BaseModel):
     completed_managers: int = 0
     manager_statuses: List[ManagerStatus] = Field(default_factory=list)
     checked_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Gateway (almcp) orchestration contract
+# ---------------------------------------------------------------------------
+
+class GatewayCallback(BaseModel):
+    """How Gigia calls back to the gateway to execute a skill."""
+
+    model_config = ConfigDict(frozen=True)
+
+    execute_url: str          # e.g. https://almcp.vercel.app/api/brain/execute
+    token: str                # Bearer API key scoped to this owner
+
+
+class OrchestrateCandidate(BaseModel):
+    """A skill the gateway retrieved and is making available to Gigia's planner."""
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    name: str
+    description: str
+    tags: List[str] = Field(default_factory=list)
+    credits: int = 1
+    best_used_when: Optional[str] = None
+    avoid_when: Optional[str] = None
+    example_call: Optional[Dict[str, Any]] = None
+
+
+class OrchestrateRequest(BaseModel):
+    """
+    Payload the gateway POSTs to /orchestrate when delegating a complex goal.
+    Gigia decomposes it into a task DAG and executes each step via callback.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str                                    # gateway brain_requests id
+    task: str                                      # the human goal
+    input: Dict[str, Any] = Field(default_factory=dict)
+    max_credits: Optional[int] = None
+    candidates: List[OrchestrateCandidate] = Field(default_factory=list)
+    callback: GatewayCallback
+
+
+class OrchestrateResponse(BaseModel):
+    """Immediate response from /orchestrate (Gigia accepted the run)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    status: str = "accepted"   # accepted | rejected
+    message: Optional[str] = None

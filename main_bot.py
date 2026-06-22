@@ -57,7 +57,12 @@ from giga_ai.brains.planning_brain import PlanningBrain
 from giga_ai.config import load_config
 from giga_ai.memory.global_memory import GlobalMemory
 from giga_ai.messaging.event_bus import EventBus, EventType
-from giga_ai.messaging.message_schemas import Goal, Task
+from giga_ai.messaging.message_schemas import (
+    GatewayCallback,
+    Goal,
+    OrchestrateCandidate,
+    Task,
+)
 from giga_ai.utils.llm_client import get_llm_client
 from giga_ai.utils.logger import get_logger
 
@@ -262,16 +267,40 @@ class MainBot:
                     extra={"goal_id": goal.goal_id, "best_practice_count": len(best_practices)},
                 )
 
-                async def _plan_and_decrement(g, ctx):
+                # Skill-mode: gateway sent candidates + callback in metadata
+                skill_mode = goal.metadata.get("_skill_mode", False)
+                candidates = None
+                gateway_callback = None
+                if skill_mode:
                     try:
-                        await self.planning.decompose_goal(g, extra_context=ctx)
+                        candidates = [
+                            OrchestrateCandidate(**c)
+                            for c in goal.metadata.get("candidates", [])
+                        ]
+                        gateway_callback = GatewayCallback(**goal.metadata["callback"])
+                    except Exception as exc:
+                        log.warning(
+                            "MainBot: failed to parse skill-mode metadata — falling back",
+                            extra={"error": str(exc)},
+                        )
+                        candidates = None
+                        gateway_callback = None
+
+                async def _plan_and_decrement(g, ctx, cands, gw_cb):
+                    try:
+                        await self.planning.decompose_goal(
+                            g,
+                            extra_context=ctx,
+                            candidates=cands,
+                            gateway_callback=gw_cb,
+                        )
                     except Exception as exc:
                         log.error("MainBot: decompose_goal failed", extra={"error": type(exc).__name__, "detail": str(exc)})
                     finally:
                         self._pending_goals = max(0, self._pending_goals - 1)
 
                 asyncio.create_task(
-                    _plan_and_decrement(goal, context),
+                    _plan_and_decrement(goal, context, candidates, gateway_callback),
                     name=f"plan_{goal.goal_id[:8]}",
                 )
             except Exception as exc:
