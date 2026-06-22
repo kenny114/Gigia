@@ -26,6 +26,7 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import List, Optional
 
 from giga_ai.memory.global_memory import GlobalMemory
@@ -177,8 +178,14 @@ class LearningBrain:
             )
             return
 
-        # Cap solvers per unique problem string to avoid repeated spawning.
-        problem_key = report.problem[:200]
+        # Normalize the problem key: strip UUIDs and task IDs so that
+        # "Task 'abc-123' produced no instructions" and "Task 'def-456'
+        # produced no instructions" are treated as the same problem.
+        _UUID_RE = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+        )
+        problem_key = _UUID_RE.sub("*", report.problem)[:200]
+
         count = self._solver_counts.get(problem_key, 0)
         if count >= self._MAX_SOLVERS_PER_PROBLEM:
             log.warning(
@@ -242,11 +249,15 @@ class LearningBrain:
             metadata={"is_problem_solver": True, "original_problem": problem, **(context or {})},
         )
 
+        # Merge is_problem_solver into memory_context so the ManagerBot
+        # includes it in any EscalationReport it emits — breaking the loop.
+        solver_context = {"is_problem_solver": True, **(context or {})}
+
         manager = ManagerBot(
             task=solver_task,
             event_bus=self._bus,
             memory=self._memory,
-            memory_context=context or {},
+            memory_context=solver_context,
             config=self._config,
             on_complete_callback=self._on_problem_solver_complete,
         )
