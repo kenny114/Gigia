@@ -345,3 +345,17 @@ async def get_skills():
     """Return all skill profiles SkillBrain has learned from real executions."""
     profiles = await _bot.skill_memory.get_all_profiles()
     return {"count": len(profiles), "skills": profiles}
+
+
+@app.get("/syntheses", tags=["brain"])
+async def get_syntheses(limit: int = 20):
+    """Return recent synthesized goal answers produced by SynthesisBrain."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        try:
+            rows = await (await db.execute(
+                "SELECT * FROM goal_syntheses ORDER BY created_at DESC LIMIT ?", (limit,)
+            )).fetchall()
+            return {"count": len(rows), "syntheses": [dict(r) for r in rows]}
+        except Exception:
+            return {"count": 0, "syntheses": []}

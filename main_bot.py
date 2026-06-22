@@ -55,6 +55,7 @@ from giga_ai.brains.learning_brain import LearningBrain
 from giga_ai.brains.perception_brain import PerceptionBrain
 from giga_ai.brains.planning_brain import PlanningBrain
 from giga_ai.brains.skill_brain import SkillBrain
+from giga_ai.brains.synthesis_brain import SynthesisBrain
 from giga_ai.config import load_config
 from giga_ai.memory.global_memory import GlobalMemory
 from giga_ai.memory.skill_memory import SkillMemory
@@ -122,6 +123,11 @@ class MainBot:
             memory=self.memory,
             config=self.config,
         )
+        self.synthesis = SynthesisBrain(
+            event_bus=self.bus,
+            llm_client=self.llm,
+            db_path=self.config.database.sqlite_path,
+        )
 
         # Wire PerceptionBrain → ExecutionBrain (for health monitoring)
         self.perception.set_execution_brain(self.execution)
@@ -150,6 +156,7 @@ class MainBot:
         # Start brains
         await self.perception.start()
         await self.skill_brain.start()
+        await self.synthesis.start()
         await self.execution.start()
         await self.learning.start()
         # PlanningBrain has no background loop — it's called on demand
@@ -183,6 +190,7 @@ class MainBot:
 
         await self.perception.stop()
         await self.skill_brain.stop()
+        await self.synthesis.stop()
         await self.execution.stop()
         await self.learning.stop()
         await self.bus.shutdown()

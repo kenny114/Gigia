@@ -239,12 +239,13 @@ class SystemHealth(BaseModel):
 # ---------------------------------------------------------------------------
 
 class GatewayCallback(BaseModel):
-    """How Gigia calls back to the gateway to execute a skill."""
+    """How Gigia calls back to the gateway to execute a skill or deliver results."""
 
     model_config = ConfigDict(frozen=True)
 
     execute_url: str          # e.g. https://almcp.vercel.app/api/brain/execute
     token: str                # Bearer API key scoped to this owner
+    result_url: str = ""      # e.g. https://almcp.vercel.app/api/brain/result — POST synthesized answer here
 
 
 class OrchestrateCandidate(BaseModel):
