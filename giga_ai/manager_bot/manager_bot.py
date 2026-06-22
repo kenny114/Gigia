@@ -125,7 +125,8 @@ class ManagerBot:
             if not instructions:
                 await self.escalate(
                     f"Task '{self.task.task_id}' produced no executable instructions "
-                    f"(missing metadata.url for sub_bot_type={self.task.sub_bot_type})"
+                    f"(sub_bot_type={self.task.sub_bot_type} — missing required metadata: "
+                    f"url for scraper/browser, code for code, operation for file, command for shell)"
                 )
                 self._status = ManagerStatusEnum.COMPLETED
                 return
@@ -370,6 +371,53 @@ class ManagerBot:
         Returns an empty list when no URL is available for a scraper/browser
         task (run() will escalate cleanly).
         """
+        # CODE tasks: pass code + input_data from metadata directly.
+        if self.task.sub_bot_type == SubBotType.CODE:
+            code = self.task.metadata.get("code", "")
+            if not code.strip():
+                self._logger.warning("ManagerBot: CODE task has no 'code' in metadata", extra={"task_id": self.task.task_id})
+                return []
+            return [SubBotInstruction(
+                task_id=self.task.task_id,
+                sub_bot_type=SubBotType.CODE,
+                parameters={
+                    "code": code,
+                    "input_data": self.task.metadata.get("input_data") or {},
+                    "timeout": self.task.metadata.get("timeout"),
+                    "packages": self.task.metadata.get("packages") or [],
+                },
+                correlation_id=self.task.correlation_id,
+                timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,
+            )]
+
+        # FILE tasks: pass operation + path + content from metadata.
+        if self.task.sub_bot_type == SubBotType.FILE:
+            operation = self.task.metadata.get("operation", "")
+            if not operation:
+                self._logger.warning("ManagerBot: FILE task has no 'operation' in metadata", extra={"task_id": self.task.task_id})
+                return []
+            return [SubBotInstruction(
+                task_id=self.task.task_id,
+                sub_bot_type=SubBotType.FILE,
+                parameters={k: v for k, v in self.task.metadata.items()},
+                correlation_id=self.task.correlation_id,
+                timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,
+            )]
+
+        # SHELL tasks: pass command + working_dir + env from metadata.
+        if self.task.sub_bot_type == SubBotType.SHELL:
+            command = self.task.metadata.get("command", "")
+            if not command.strip():
+                self._logger.warning("ManagerBot: SHELL task has no 'command' in metadata", extra={"task_id": self.task.task_id})
+                return []
+            return [SubBotInstruction(
+                task_id=self.task.task_id,
+                sub_bot_type=SubBotType.SHELL,
+                parameters={k: v for k, v in self.task.metadata.items()},
+                correlation_id=self.task.correlation_id,
+                timeout_seconds=self._config.manager_bot.sub_bot_timeout_seconds,
+            )]
+
         # Skill tasks don't need a URL — they call back to the gateway.
         if self.task.sub_bot_type == SubBotType.SKILL:
             slug = self.task.skill_slug or self.task.metadata.get("skill_slug")

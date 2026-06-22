@@ -49,3 +49,11 @@ gateway:
   base_url: ""
   # Shared secret for /orchestrate auth — override with GIGA_GATEWAY__SHARED_SECRET
   shared_secret: ""
+
+workspace:
+  # Base directory for FileSubBot — all file paths are resolved here
+  base_dir: "/opt/gigia/workspace"
+  python_bin: "python3"
+  exec_timeout_seconds: 30
+  # Comma-separated allowed shell command prefixes (empty string = allow all)
+  shell_whitelist: "ffmpeg,convert,git,curl,wget,python3,node,jq,cat,ls,cp,mv,mkdir,echo,wc,head,tail,grep,sort,uniq,zip,unzip"

@@ -45,6 +45,9 @@ class SubBotType(str, Enum):
     BROWSER = "browser"
     GENERIC = "generic"
     SKILL = "skill"     # calls back to the almcp gateway /api/brain/execute
+    CODE = "code"       # sandboxed Python execution
+    FILE = "file"       # read/write files in the workspace directory
+    SHELL = "shell"     # run whitelisted shell commands on the VPS
 
 
 class ErrorType(str, Enum):
@@ -55,6 +58,8 @@ class ErrorType(str, Enum):
     HTTP_5XX = "HTTP5xx"
     PARSE_ERROR = "ParseError"
     BROWSER_CRASH = "BrowserCrash"
+    EXECUTION_ERROR = "ExecutionError"   # code/shell returned non-zero exit
+    PERMISSION_DENIED = "PermissionDenied"  # path traversal or blocked command
     UNKNOWN = "Unknown"
 
 

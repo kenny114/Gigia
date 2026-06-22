@@ -87,6 +87,20 @@ class GatewayConfig:
     shared_secret: str = ""
 
 
+@dataclass
+class WorkspaceConfig:
+    # Base directory for FileSubBot — all paths are resolved relative to this.
+    # Set via env GIGA_WORKSPACE__BASE_DIR
+    base_dir: str = "/opt/gigia/workspace"
+    # Python interpreter for CodeSubBot
+    python_bin: str = "python3"
+    # Max seconds a code or shell task may run before being killed
+    exec_timeout_seconds: int = 30
+    # Comma-separated list of allowed shell command prefixes (empty = allow all)
+    # e.g. "ffmpeg,imagemagick,git,curl,python3"
+    shell_whitelist: str = "ffmpeg,convert,git,curl,wget,python3,node,jq,cat,ls,cp,mv,mkdir,echo,wc,head,tail,grep,sort,uniq,zip,unzip"
+
+
 # ---------------------------------------------------------------------------
 # Root config
 # ---------------------------------------------------------------------------
@@ -102,6 +116,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     event_bus: EventBusConfig = field(default_factory=EventBusConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +165,7 @@ def _apply_dict_to_config(cfg: Config, data: dict) -> None:
         "logging": ("logging", LoggingConfig),
         "event_bus": ("event_bus", EventBusConfig),
         "gateway": ("gateway", GatewayConfig),
+        "workspace": ("workspace", WorkspaceConfig),
     }
     for section, (attr, klass) in section_map.items():
         if section in data:

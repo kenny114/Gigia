@@ -58,37 +58,49 @@ Each task object must have these fields:
   task_id      (string)  – unique id like "task-1", "task-2", etc.
   title        (string)  – short task title
   description  (string)  – what to do, single line, no newlines
-  sub_bot_type (string)  – one of: "scraper", "browser"
+  sub_bot_type (string)  – one of: "scraper", "browser", "code", "file", "shell"
   priority     (integer) – execution order, 1 = highest priority
   dependencies (array)   – list of task_id strings that must finish first
   metadata     (object)  – REQUIRED; see rules below
 
 SUB_BOT_TYPE SELECTION RULES (follow exactly):
-- Use "browser" for: Google Maps, Google Search, Yelp, TripAdvisor, any site that loads content via JavaScript, single-page apps, sites that require scrolling to reveal results.
-- Use "scraper" for: Wikipedia, plain HTML directory listings, static informational pages, REST APIs that return HTML.
-- When in doubt, use "browser".
+- "browser": Google Maps, Google Search, Yelp, TripAdvisor, any JavaScript-heavy site or SPA.
+- "scraper": Wikipedia, plain HTML pages, static sites, REST APIs returning HTML.
+- "code": run Python — data analysis, math, CSV/JSON processing, transformations, charting. metadata must include "code" (Python source string). Use input_data to pass values from prior tasks.
+- "file": read or write a file in the workspace. metadata must include "operation" ("read"/"write"/"append"/"list"/"delete") and "path" (relative path). For writes also include "content".
+- "shell": run a shell command — ffmpeg, git, curl, imagemagick, zip, etc. metadata must include "command". Only use for tools that have no Python equivalent.
+- When in doubt between browser/scraper, use "browser".
+- Prefer "code" over "shell" for data processing tasks.
 
-METADATA RULES:
-- metadata MUST always include "url": a real, fully-qualified public URL.
-- For local/maps/business searches: "url": "https://www.google.com/maps/search/your+encoded+query"
+METADATA RULES FOR "browser" AND "scraper":
+- metadata MUST include "url": a fully-qualified public URL.
+- For maps/business searches: "url": "https://www.google.com/maps/search/your+encoded+query"
 - For web searches: "url": "https://www.google.com/search?q=your+encoded+query"
-- For static pages: "url": the direct page URL
 
-ADDITIONAL METADATA FOR "browser" TASKS:
-- "wait_for" (string): CSS selector that appears when results are loaded. Examples:
-    Google Maps: "div[role='feed']"
-    Google Search: "#search"
-    Yelp: "[data-testid='serp-ia-card']"
-- "scroll_feed" (boolean): true if the page needs scrolling to reveal more results
-- "scroll_count" (integer): how many scroll steps (default 4 for Maps/Yelp)
-- "css_selectors" (object): field_name → CSS selector for data extraction. Examples:
-    Google Maps names: "div[role='feed'] a[aria-label]"
-    Google Maps links: "div[role='feed'] a[href*='maps']"
+ADDITIONAL METADATA FOR "browser":
+- "wait_for" (string): CSS selector that appears when results load.
+- "scroll_feed" (boolean): true if scrolling is needed.
+- "css_selectors" (object): field_name → CSS selector for extraction.
+
+METADATA FOR "code":
+- "code" (string): Python source. Print structured output with "RESULT: <json>" on its own line. Access prior task results via input_data dict.
+- "input_data" (object): key/value pairs injected as the input_data variable.
+- "timeout" (int): seconds, default 30.
+
+METADATA FOR "file":
+- "operation": "read" | "write" | "append" | "list" | "delete"
+- "path": relative path within workspace (e.g. "output/results.csv")
+- "content": string to write (required for write/append)
+
+METADATA FOR "shell":
+- "command": the shell command to run (e.g. "ffmpeg -i input.mp4 output.mp3")
+- "working_dir": relative path within workspace (optional)
+- "timeout": seconds, default 30.
 
 ABSOLUTE RULES:
-- Every task MUST have metadata.url set to a real, public URL. Never omit it.
+- browser/scraper tasks MUST have metadata.url set to a real public URL.
 - description must be a single line string with no newline characters.
-- Always produce 2-5 tasks."""
+- Always produce 2-6 tasks."""
 
 _DECOMPOSE_USER_TEMPLATE = """Goal: {goal}
 
