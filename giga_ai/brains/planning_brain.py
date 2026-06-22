@@ -382,9 +382,9 @@ class PlanningBrain:
             if start != -1 and end != -1:
                 raw = raw[start:end + 1]
 
-        # Strip JavaScript-style // comments (GPT sometimes adds them)
+        # NOTE: do NOT strip // here — it also strips URLs (https://...).
+        # response_format=json_object means the model won't emit JS comments.
         import re
-        raw = re.sub(r"//[^\n]*", "", raw)
         # Strip trailing commas before ] or } (common GPT mistake)
         raw = re.sub(r",\s*([}\]])", r"\1", raw)
         # Replace literal control characters inside strings (newlines, tabs, etc.)
