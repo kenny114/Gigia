@@ -50,6 +50,10 @@ class LearningBrain:
         Config override; loaded from singleton if not supplied.
     """
 
+    # Max times LearningBrain will spawn a solver for the same problem string.
+    # Prevents the infinite escalation loop where every solver task also fails.
+    _MAX_SOLVERS_PER_PROBLEM = 1
+
     def __init__(
         self,
         event_bus: EventBus,
@@ -60,6 +64,8 @@ class LearningBrain:
         self._memory = memory
         self._escalation_listener_task: Optional[asyncio.Task] = None
         self._running = False
+        # Track how many solvers we've spawned per problem to cap the loop.
+        self._solver_counts: dict[str, int] = {}
 
         if config is None:
             from giga_ai.config import get_config
@@ -161,6 +167,26 @@ class LearningBrain:
                 correlation_id=report.correlation_id,
             )
             return
+
+        # Don't spawn solvers for tasks that are themselves problem-solvers —
+        # that's the root cause of the infinite escalation loop.
+        if report.context.get("is_problem_solver"):
+            log.warning(
+                "LearningBrain: problem-solver task failed — not re-escalating",
+                extra={"problem": report.problem[:120]},
+            )
+            return
+
+        # Cap solvers per unique problem string to avoid repeated spawning.
+        problem_key = report.problem[:200]
+        count = self._solver_counts.get(problem_key, 0)
+        if count >= self._MAX_SOLVERS_PER_PROBLEM:
+            log.warning(
+                "LearningBrain: max solvers reached for problem — dropping escalation",
+                extra={"problem": problem_key[:120], "count": count},
+            )
+            return
+        self._solver_counts[problem_key] = count + 1
 
         # No known strategy – spawn a problem-solver
         await self.spawn_problem_solver(
