@@ -70,6 +70,8 @@ class SynthesisBrain:
 
         # goal_id → {result_url, token, goal_description} for skill-mode goals
         self._pending: Dict[str, dict] = {}
+        # goal_id → list of skill result dicts (from SUB_BOT_RESULT events)
+        self._skill_results: Dict[str, List[dict]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -86,11 +88,14 @@ class SynthesisBrain:
         self._listener_task = asyncio.create_task(
             self._goal_completed_listener(), name="synthesis_goal_completed"
         )
+        self._skill_result_task = asyncio.create_task(
+            self._skill_result_listener(), name="synthesis_skill_results"
+        )
         log.info("SynthesisBrain started")
 
     async def stop(self) -> None:
         self._running = False
-        for t in [self._goal_recv_task, self._listener_task]:
+        for t in [self._goal_recv_task, self._listener_task, self._skill_result_task]:
             if t and not t.done():
                 t.cancel()
                 try:
@@ -248,7 +253,31 @@ class SynthesisBrain:
     # DB helpers
     # ------------------------------------------------------------------
 
+    async def _skill_result_listener(self) -> None:
+        """Cache skill execution results by goal_id for synthesis."""
+        async for msg in self._bus.subscribe(EventType.SUB_BOT_RESULT):
+            if not self._running:
+                break
+            try:
+                p = msg.payload
+                goal_id = p.get("goal_id", "")
+                if not goal_id:
+                    continue
+                data = p.get("data") or p
+                task_id = p.get("task_id", "")
+                self._skill_results.setdefault(goal_id, []).append(
+                    {"task_id": task_id, "data": data}
+                )
+            except Exception as exc:
+                log.warning("SynthesisBrain: error on SUB_BOT_RESULT", extra={"error": str(exc)})
+
     async def _load_results(self, goal_id: str) -> List[dict]:
+        # Skill-mode results arrive via SUB_BOT_RESULT events and are cached in memory.
+        skill_results = self._skill_results.pop(goal_id, [])
+        if skill_results:
+            return skill_results
+
+        # Native-mode: fall back to scraped_results SQLite table.
         try:
             async with aiosqlite.connect(self._db_path) as db:
                 db.row_factory = aiosqlite.Row
