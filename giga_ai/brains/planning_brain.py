@@ -244,7 +244,7 @@ class PlanningBrain:
                     "slug": c.slug,
                     "name": c.name,
                     "description": c.description,
-                    "credit_cost": c.credit_cost,
+                    "credit_cost": c.credits,
                     "best_used_when": c.best_used_when or "",
                 }
                 for c in (candidates or [])
