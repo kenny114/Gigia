@@ -347,6 +347,34 @@ async def get_skills():
     return {"count": len(profiles), "skills": profiles}
 
 
+@app.get("/self-improvement", tags=["brain"])
+async def get_self_improvement():
+    """
+    Return GoalGeneratorBrain's current view: seen-but-untested skills,
+    stats on how many self-improvement goals have been generated this session,
+    and the most recent goal strings it submitted.
+    """
+    if not _bot:
+        raise HTTPException(status_code=503, detail="Bot is not running")
+    gg = _bot.goal_generator
+    profiles = await _bot.skill_memory.get_all_profiles()
+    used_slugs = {p["slug"] for p in profiles}
+    untested = sorted(gg._seen_skills - used_slugs)
+    weak = [
+        {"slug": p["slug"], "reliability": round(p.get("reliability", 0), 2),
+         "uses": p.get("success_count", 0) + p.get("fail_count", 0)}
+        for p in profiles
+        if (p.get("success_count", 0) + p.get("fail_count", 0)) >= 3
+        and p.get("reliability", 1.0) < 0.60
+    ]
+    return {
+        "total_generated_this_session": gg._total_generated,
+        "recent_goals": gg._recent_goals[-10:],
+        "untested_skills": untested,
+        "weak_skills": weak,
+    }
+
+
 @app.get("/syntheses", tags=["brain"])
 async def get_syntheses(limit: int = 20):
     """Return recent synthesized goal answers produced by SynthesisBrain."""

@@ -54,6 +54,7 @@ from giga_ai.brains.execution_brain import ExecutionBrain
 from giga_ai.brains.learning_brain import LearningBrain
 from giga_ai.brains.perception_brain import PerceptionBrain
 from giga_ai.brains.planning_brain import PlanningBrain
+from giga_ai.brains.goal_generator_brain import GoalGeneratorBrain
 from giga_ai.brains.skill_brain import SkillBrain
 from giga_ai.brains.synthesis_brain import SynthesisBrain
 from giga_ai.config import load_config
@@ -98,7 +99,7 @@ class MainBot:
         self.skill_memory = SkillMemory(self.config.database.sqlite_path)
         self.llm = get_llm_client(self.config)
 
-        # ── Five brains ─────────────────────────────────────────────────────
+        # ── Seven brains ────────────────────────────────────────────────────
         self.perception = PerceptionBrain(
             event_bus=self.bus,
             health_poll_interval=10.0,
@@ -127,6 +128,13 @@ class MainBot:
             event_bus=self.bus,
             llm_client=self.llm,
             db_path=self.config.database.sqlite_path,
+        )
+        self.goal_generator = GoalGeneratorBrain(
+            event_bus=self.bus,
+            skill_memory=self.skill_memory,
+            global_memory=self.memory,
+            llm_client=self.llm,
+            submit_goal_fn=self.submit_goal,
         )
 
         # Wire PerceptionBrain → ExecutionBrain (for health monitoring)
@@ -157,6 +165,7 @@ class MainBot:
         await self.perception.start()
         await self.skill_brain.start()
         await self.synthesis.start()
+        await self.goal_generator.start()
         await self.execution.start()
         await self.learning.start()
         # PlanningBrain has no background loop — it's called on demand
@@ -191,6 +200,7 @@ class MainBot:
         await self.perception.stop()
         await self.skill_brain.stop()
         await self.synthesis.stop()
+        await self.goal_generator.stop()
         await self.execution.stop()
         await self.learning.stop()
         await self.bus.shutdown()
