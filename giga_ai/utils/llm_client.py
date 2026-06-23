@@ -98,7 +98,7 @@ class OpenAILLMClient(LLMClient):
         self._temperature = temperature
         self._max_tokens = max_tokens
 
-    async def complete(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    async def complete(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -106,14 +106,17 @@ class OpenAILLMClient(LLMClient):
 
         log.info("Sending prompt to OpenAI", extra={"model": self._model, "prompt_len": len(prompt)})
 
+        kwargs: dict = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                response_format={"type": "json_object"},
-            )
+            response = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             log.error("OpenAI API call failed", extra={"error": type(exc).__name__, "detail": str(exc)})
             raise

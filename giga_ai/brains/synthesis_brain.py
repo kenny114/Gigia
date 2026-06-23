@@ -200,7 +200,7 @@ class SynthesisBrain:
             goal=goal,
             results=results_str[:12_000],  # cap to avoid token overflow
         )
-        return await self._llm.complete(prompt, system_prompt=_SYNTHESIS_SYSTEM_PROMPT)
+        return await self._llm.complete(prompt, system_prompt=_SYNTHESIS_SYSTEM_PROMPT, json_mode=False)
 
     async def _deliver(
         self,
