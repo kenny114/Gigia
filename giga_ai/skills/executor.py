@@ -57,8 +57,9 @@ def get_db_path() -> str:
 _BLOCKED_IMPORTS: frozenset[str] = frozenset({
     "os", "sys", "subprocess", "socket", "pathlib", "shutil",
     "ctypes", "importlib", "pickle", "shelve", "glob",
-    "pty", "pty", "resource", "signal", "threading", "multiprocessing",
-    "tempfile", "io", "builtins",
+    "pty", "resource", "signal", "threading", "multiprocessing",
+    "tempfile", "builtins",
+    # io is allowed (StringIO/BytesIO are harmless); open() is blocked via builtins
 })
 
 # Imports blocked unless allow_network=True.
