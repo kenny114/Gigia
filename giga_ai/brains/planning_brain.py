@@ -256,17 +256,25 @@ class PlanningBrain:
                     candidates_str = await self._skill_brain.get_briefing(candidate_dicts)
                 except Exception as exc:
                     log.warning("PlanningBrain: SkillBrain briefing failed — using raw candidates", extra={"error": str(exc)})
-                    candidates_str = "\n".join(
-                        f"  {c['slug']}: {c['name']} — {c['description']}"
-                        + (f" (best when: {c['best_used_when']})" if c["best_used_when"] else "")
-                        for c in candidate_dicts
-                    )
+                    import json as _json
+                    def _fmt_fallback(c: dict) -> str:
+                        line = f"  {c['slug']}: {c['name']} — {c['description']}"
+                        if c.get("best_used_when"):
+                            line += f" (best when: {c['best_used_when']})"
+                        if c.get("example_call"):
+                            line += f" [example args: {_json.dumps(c['example_call'])}]"
+                        return line
+                    candidates_str = "\n".join(_fmt_fallback(c) for c in candidate_dicts)
             else:
-                candidates_str = "\n".join(
-                    f"  {c['slug']}: {c['name']} — {c['description']}"
-                    + (f" (best when: {c['best_used_when']})" if c["best_used_when"] else "")
-                    for c in candidate_dicts
-                )
+                def _fmt_candidate(c: dict) -> str:
+                    line = f"  {c['slug']}: {c['name']} — {c['description']}"
+                    if c.get("best_used_when"):
+                        line += f" (best when: {c['best_used_when']})"
+                    if c.get("example_call"):
+                        import json as _json
+                        line += f" [example args: {_json.dumps(c['example_call'])}]"
+                    return line
+                candidates_str = "\n".join(_fmt_candidate(c) for c in candidate_dicts)
 
             prompt = _SKILL_DECOMPOSE_USER_TEMPLATE.format(
                 goal=goal.description,
