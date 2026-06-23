@@ -214,7 +214,7 @@ class ManagerBot:
                     results.append(result)
                     await self._bus.publish(
                         EventType.SUB_BOT_RESULT,
-                        payload=result.model_dump(mode="json"),
+                        payload={**result.model_dump(mode="json"), "goal_id": self.task.goal_id},
                         correlation_id=self.task.correlation_id,
                     )
             except Exception as exc:
