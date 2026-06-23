@@ -393,6 +393,20 @@ async def get_capability_gaps():
             return {"count": 0, "gaps": []}
 
 
+@app.get("/factory", tags=["brain"])
+async def get_factory():
+    """SkillFactoryBrain status — sequences discovered, compositions created, skills improved."""
+    if not _bot:
+        raise HTTPException(status_code=503, detail="Bot is not running")
+    sf = _bot.skill_factory
+    return {
+        "sequences_tracked": {" → ".join(k): v for k, v in sf._sequence_counts.items()},
+        "compositions_created": [" → ".join(k) for k in sf._composed],
+        "skills_improved_this_session": list(sf._improved),
+        "in_flight_goals": {k: v for k, v in sf._goal_sequences.items()},
+    }
+
+
 @app.get("/self-improvement", tags=["brain"])
 async def get_self_improvement():
     """

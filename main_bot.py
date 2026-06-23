@@ -57,6 +57,7 @@ from giga_ai.brains.planning_brain import PlanningBrain
 from giga_ai.brains.goal_generator_brain import GoalGeneratorBrain
 from giga_ai.brains.introspection_brain import IntrospectionBrain
 from giga_ai.brains.skill_brain import SkillBrain
+from giga_ai.brains.skill_factory_brain import SkillFactoryBrain
 from giga_ai.brains.synthesis_brain import SynthesisBrain
 from giga_ai.config import load_config
 from giga_ai.memory.global_memory import GlobalMemory
@@ -130,6 +131,13 @@ class MainBot:
             llm_client=self.llm,
             db_path=self.config.database.sqlite_path,
         )
+        self.skill_factory = SkillFactoryBrain(
+            event_bus=self.bus,
+            skill_memory=self.skill_memory,
+            llm_client=self.llm,
+            gateway_url=self.config.gateway.base_url or "https://almcp.vercel.app",
+            giga_secret=self.config.gateway.shared_secret,
+        )
         self.introspection = IntrospectionBrain(
             event_bus=self.bus,
             llm_client=self.llm,
@@ -173,6 +181,7 @@ class MainBot:
         await self.skill_brain.start()
         await self.synthesis.start()
         await self.introspection.start()
+        await self.skill_factory.start()
         await self.goal_generator.start()
         await self.execution.start()
         await self.learning.start()
@@ -209,6 +218,7 @@ class MainBot:
         await self.skill_brain.stop()
         await self.synthesis.stop()
         await self.introspection.stop()
+        await self.skill_factory.stop()
         await self.goal_generator.stop()
         await self.execution.stop()
         await self.learning.stop()
