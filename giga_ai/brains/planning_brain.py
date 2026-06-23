@@ -320,14 +320,27 @@ class PlanningBrain:
         )
 
         if not tasks:
-            # Nothing to execute — fire GOAL_COMPLETED immediately so
-            # SynthesisBrain can still deliver a result to the callback URL.
+            if skill_mode:
+                # No tasks planned despite being in skill mode — either the
+                # candidate list was empty or none of the available skills
+                # matched the goal. Signal SkillFactoryBrain so it can generate
+                # a new skill for this capability gap.
+                await self._bus.publish(
+                    EventType.SKILL_GAP_DETECTED,
+                    payload={
+                        "goal_id":          goal.goal_id,
+                        "goal_description": goal.description,
+                        "candidate_count":  len(candidates or []),
+                    },
+                )
+
+            # Fire GOAL_COMPLETED so SynthesisBrain delivers a result.
             await self._bus.publish(
                 EventType.GOAL_COMPLETED,
                 payload={
-                    "goal_id": goal.goal_id,
+                    "goal_id":          goal.goal_id,
                     "goal_description": goal.description,
-                    "success": False,
+                    "success":          False,
                 },
             )
             return tasks

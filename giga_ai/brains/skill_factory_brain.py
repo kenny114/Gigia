@@ -64,6 +64,47 @@ Return ONLY valid JSON:
 {"tags": ["tag1","tag2",...], "description": "...", "best_used_when": "..."}
 Keep descriptions under 120 chars. Tags should be single lowercase words or short phrases."""
 
+_GENERATE_SYSTEM = """\
+You are a skill generator for Gigia, an autonomous AI agent. Generate a Python skill module.
+
+A skill is a Python module containing exactly ONE function:
+  def run(input_data: dict) -> dict
+
+Rules:
+- Return a dict with meaningful keys (never None, never a non-dict)
+- Return {"error": "..."} on expected failures instead of raising
+- Allowed imports: json, re, datetime, math, collections, itertools, requests, httpx, bs4
+- FORBIDDEN: eval, exec, compile, open, os.system, os.popen, subprocess.Popen/run/call
+- Under 80 lines of code
+- JSON-serializable output only (str, int, float, bool, list, dict, None)
+
+Respond with ONLY valid JSON (no markdown fences):
+{
+  "code": "...full Python code as a string...",
+  "slug": "snake_case_name",
+  "name": "Display Name",
+  "description": "What it does in one sentence (max 120 chars)",
+  "tags": ["tag1", "tag2", "tag3"],
+  "best_used_when": "one sentence describing ideal use case",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "field_name": {"type": "string", "description": "..."}
+    },
+    "required": ["field_name"]
+  },
+  "credit_cost": 2
+}"""
+
+_GENERATE_USER_TEMPLATE = """\
+A user tried to accomplish this goal but I had no suitable skill:
+  "{goal}"
+
+Available skills couldn't handle it (matched {candidate_count} candidates, none worked).
+
+Generate a new Python skill that could handle this type of goal in the future.
+Focus on the core capability gap, not the specific goal — make it reusable."""
+
 
 class SkillFactoryBrain:
     """
@@ -108,6 +149,10 @@ class SkillFactoryBrain:
         self._skill_task:    Optional[asyncio.Task] = None
         self._complete_task: Optional[asyncio.Task] = None
         self._improve_task:  Optional[asyncio.Task] = None
+        self._gap_task:      Optional[asyncio.Task] = None
+
+        # gap descriptions already being generated (avoid duplicate work)
+        self._gaps_in_flight: Set[str] = set()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -115,10 +160,11 @@ class SkillFactoryBrain:
         self._skill_task    = asyncio.create_task(self._skill_listener(),    name="factory_skill")
         self._complete_task = asyncio.create_task(self._complete_listener(), name="factory_complete")
         self._improve_task  = asyncio.create_task(self._improve_loop(),      name="factory_improve")
+        self._gap_task      = asyncio.create_task(self._gap_listener(),      name="factory_gap")
         log.info("SkillFactoryBrain: started")
 
     async def stop(self) -> None:
-        for t in [self._skill_task, self._complete_task, self._improve_task]:
+        for t in [self._skill_task, self._complete_task, self._improve_task, self._gap_task]:
             if t and not t.done():
                 t.cancel()
                 try:
@@ -325,6 +371,96 @@ class SkillFactoryBrain:
 
         if improved:
             log.info("SkillFactoryBrain: improvement cycle done", extra={"improved": improved})
+
+    # ── Gap detection → code generation ──────────────────────────────────────
+
+    async def _gap_listener(self) -> None:
+        async for msg in self._bus.subscribe(EventType.SKILL_GAP_DETECTED):
+            try:
+                p = msg.payload
+                goal_desc      = p.get("goal_description", "")
+                candidate_count = p.get("candidate_count", 0)
+                if not goal_desc:
+                    continue
+                # Dedupe: don't regenerate for a very similar gap in-flight
+                key = goal_desc[:120].lower()
+                if key in self._gaps_in_flight:
+                    continue
+                self._gaps_in_flight.add(key)
+                asyncio.create_task(
+                    self._generate_from_gap(goal_desc, candidate_count),
+                    name="factory_generate",
+                )
+            except Exception as exc:
+                log.error("SkillFactoryBrain: gap_listener error", extra={"e": str(exc)})
+
+    async def _generate_from_gap(self, goal_desc: str, candidate_count: int) -> None:
+        """Generate a new Python skill for an identified capability gap."""
+        log.info("SkillFactoryBrain: generating skill for gap", extra={
+            "goal": goal_desc[:80], "candidates": candidate_count
+        })
+
+        prompt = _GENERATE_USER_TEMPLATE.format(
+            goal=goal_desc[:300],
+            candidate_count=candidate_count,
+        )
+        try:
+            raw = await self._llm.complete(prompt, system_prompt=_GENERATE_SYSTEM)
+            raw = _strip_fences(raw)
+            meta = json.loads(raw)
+        except Exception as exc:
+            log.error("SkillFactoryBrain: skill generation LLM failed", extra={"e": str(exc)})
+            self._gaps_in_flight.discard(goal_desc[:120].lower())
+            return
+
+        slug = meta.get("slug", "")
+        code = meta.get("code", "")
+        if not slug or not code:
+            log.warning("SkillFactoryBrain: generation returned no slug/code")
+            self._gaps_in_flight.discard(goal_desc[:120].lower())
+            return
+
+        if not re.match(r'^[a-z0-9_]+$', slug):
+            slug = re.sub(r'[^a-z0-9_]', '_', slug.lower())
+
+        # 1. Store skill code on the VPS executor
+        ok_vps, resp_vps = await self._post("/skills/register", {
+            "slug":     slug,
+            "code":     code,
+            "metadata": {k: v for k, v in meta.items() if k != "code"},
+        })
+        if not ok_vps:
+            log.error("SkillFactoryBrain: VPS skill register failed", extra={
+                "slug": slug, "resp": resp_vps
+            })
+            self._gaps_in_flight.discard(goal_desc[:120].lower())
+            return
+
+        # 2. Register the endpoint in almcp catalog
+        ok_catalog, resp_catalog = await self._post("/api/skills/generate", {
+            "slug":           slug,
+            "name":           meta.get("name", slug.replace("_", " ").title()),
+            "description":    meta.get("description", f"Generated: {goal_desc[:80]}"),
+            "tags":           meta.get("tags", []),
+            "best_used_when": meta.get("best_used_when", ""),
+            "avoid_when":     meta.get("avoid_when", ""),
+            "input_schema":   meta.get("input_schema"),
+            "credit_cost":    meta.get("credit_cost", 2),
+            "generated_from": goal_desc[:300],
+        })
+
+        if ok_catalog:
+            log.info("SkillFactoryBrain: new skill generated and registered", extra={
+                "slug": slug, "credits": resp_catalog.get("credit_cost")
+            })
+        elif resp_catalog.get("error") == "slug_taken":
+            log.info("SkillFactoryBrain: generated slug already exists", extra={"slug": slug})
+        else:
+            log.warning("SkillFactoryBrain: catalog registration failed", extra={
+                "slug": slug, "resp": resp_catalog
+            })
+
+        self._gaps_in_flight.discard(goal_desc[:120].lower())
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 

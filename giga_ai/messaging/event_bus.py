@@ -66,6 +66,7 @@ class EventType(str, Enum):
     MANAGER_COMPLETED = "MANAGER_COMPLETED"
     SKILL_EXECUTED = "SKILL_EXECUTED"    # SkillSubBot ran — SkillBrain updates profile
     GOAL_COMPLETED = "GOAL_COMPLETED"    # all tasks for a goal done — SkillBrain records interactions
+    SKILL_GAP_DETECTED = "SKILL_GAP_DETECTED"  # no suitable skill found — SkillFactoryBrain generates one
     ALL = "*"               # wildcard – receives every event
 
 

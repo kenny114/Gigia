@@ -32,6 +32,13 @@ from giga_ai.messaging.message_schemas import (
     OrchestrateRequest,
     OrchestrateResponse,
 )
+from giga_ai.skills.executor import (
+    SkillSafetyError,
+    init_db as _executor_init_db,
+    list_skills as _executor_list_skills,
+    run_skill as _executor_run_skill,
+    store_skill as _executor_store_skill,
+)
 
 from main_bot import MainBot
 from giga_ai.config import load_config
@@ -138,6 +145,9 @@ async def lifespan(app: FastAPI):
 
     config = load_config()
     _DB_PATH = config.database.sqlite_path
+
+    # Ensure generated_skills table exists before the bot starts
+    await _executor_init_db(_DB_PATH)
 
     _bot = MainBot(config=config)
     await _bot.start()
@@ -339,6 +349,67 @@ async def get_results(limit: int = 100):
         results=[ResultItem(**r) for r in rows],
     )
 
+
+def _check_secret(x_giga_secret: Optional[str]) -> bool:
+    """Verify the X-Giga-Secret header against the configured shared secret."""
+    config = _bot.config if _bot else None
+    expected = getattr(getattr(config, "gateway", None), "shared_secret", "")
+    return not expected or x_giga_secret == expected
+
+
+# ── Generated-skill endpoints ────────────────────────────────────────────────
+
+class SkillRegisterRequest(BaseModel):
+    slug:     str
+    code:     str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class SkillRunRequest(BaseModel):
+    input_data: Optional[Dict[str, Any]] = None
+
+
+@app.post("/skills/register", tags=["factory"])
+async def register_generated_skill(
+    req: SkillRegisterRequest,
+    x_giga_secret: Optional[str] = Header(None, alias="X-Giga-Secret"),
+):
+    """SkillFactoryBrain stores generated Python code as a callable skill."""
+    if not _check_secret(x_giga_secret):
+        raise HTTPException(status_code=401, detail="Invalid X-Giga-Secret")
+    try:
+        await _executor_store_skill(_DB_PATH, req.slug, req.code, req.metadata or {})
+        return {"ok": True, "slug": req.slug}
+    except SkillSafetyError as exc:
+        raise HTTPException(status_code=400, detail=f"safety validation failed: {exc}")
+    except Exception as exc:
+        log.error("api: skill register error", extra={"error": str(exc)})
+        raise HTTPException(status_code=500, detail="internal error")
+
+
+@app.post("/skills/run/{slug}", tags=["factory"])
+async def run_generated_skill(
+    slug: str,
+    req: SkillRunRequest,
+    x_giga_secret: Optional[str] = Header(None, alias="X-Giga-Secret"),
+):
+    """almcp calls this to execute a generated skill by slug."""
+    if not _check_secret(x_giga_secret):
+        raise HTTPException(status_code=401, detail="Invalid X-Giga-Secret")
+    ok, result = await _executor_run_skill(_DB_PATH, slug, req.input_data or {})
+    if not ok:
+        raise HTTPException(status_code=502, detail=str(result))
+    return result
+
+
+@app.get("/skills/generated", tags=["factory"])
+async def list_generated_skills():
+    """Return all skills Gigia has generated herself."""
+    skills = await _executor_list_skills(_DB_PATH)
+    return {"count": len(skills), "skills": skills}
+
+
+# ── Legacy skill profiles ────────────────────────────────────────────────────
 
 @app.get("/skills", tags=["brain"])
 async def get_skills():
