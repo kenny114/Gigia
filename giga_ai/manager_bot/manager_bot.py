@@ -286,8 +286,11 @@ class ManagerBot:
                 extra={"error_type": err_type, "new_proxy": new_proxy or "(direct)"},
             )
 
-        # Retry
-        return await self._run_sub_bot(instruction)
+        # Retry — discard if the retry also produced an ErrorReport
+        recovered = await self._run_sub_bot(instruction)
+        if isinstance(recovered, Result):
+            return recovered
+        return None
 
     async def escalate(self, problem: str) -> None:
         """
