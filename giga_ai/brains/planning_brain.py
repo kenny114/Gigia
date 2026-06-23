@@ -319,6 +319,19 @@ class PlanningBrain:
             extra={"goal_id": goal.goal_id, "task_count": len(tasks)},
         )
 
+        if not tasks:
+            # Nothing to execute — fire GOAL_COMPLETED immediately so
+            # SynthesisBrain can still deliver a result to the callback URL.
+            await self._bus.publish(
+                EventType.GOAL_COMPLETED,
+                payload={
+                    "goal_id": goal.goal_id,
+                    "goal_description": goal.description,
+                    "success": False,
+                },
+            )
+            return tasks
+
         for task in tasks:
             await self._emit_task_created(task)
 
