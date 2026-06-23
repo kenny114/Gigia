@@ -55,6 +55,7 @@ from giga_ai.brains.learning_brain import LearningBrain
 from giga_ai.brains.perception_brain import PerceptionBrain
 from giga_ai.brains.planning_brain import PlanningBrain
 from giga_ai.brains.goal_generator_brain import GoalGeneratorBrain
+from giga_ai.brains.introspection_brain import IntrospectionBrain
 from giga_ai.brains.skill_brain import SkillBrain
 from giga_ai.brains.synthesis_brain import SynthesisBrain
 from giga_ai.config import load_config
@@ -129,12 +130,18 @@ class MainBot:
             llm_client=self.llm,
             db_path=self.config.database.sqlite_path,
         )
+        self.introspection = IntrospectionBrain(
+            event_bus=self.bus,
+            llm_client=self.llm,
+            db_path=self.config.database.sqlite_path,
+        )
         self.goal_generator = GoalGeneratorBrain(
             event_bus=self.bus,
             skill_memory=self.skill_memory,
             global_memory=self.memory,
             llm_client=self.llm,
             submit_goal_fn=self.submit_goal,
+            introspection_brain=self.introspection,
         )
 
         # Wire PerceptionBrain → ExecutionBrain (for health monitoring)
@@ -165,6 +172,7 @@ class MainBot:
         await self.perception.start()
         await self.skill_brain.start()
         await self.synthesis.start()
+        await self.introspection.start()
         await self.goal_generator.start()
         await self.execution.start()
         await self.learning.start()
@@ -200,6 +208,7 @@ class MainBot:
         await self.perception.stop()
         await self.skill_brain.stop()
         await self.synthesis.stop()
+        await self.introspection.stop()
         await self.goal_generator.stop()
         await self.execution.stop()
         await self.learning.stop()

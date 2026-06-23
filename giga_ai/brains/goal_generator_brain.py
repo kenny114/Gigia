@@ -84,10 +84,11 @@ class GoalGeneratorBrain:
     global_memory:
         GlobalMemory instance (already init'd).
     llm_client:
-        Any client with an async ``chat(system, user) -> str`` method
-        (same interface used by PlanningBrain / SynthesisBrain).
+        Any client with an async ``complete(prompt, system_prompt) -> str`` method.
     submit_goal_fn:
         ``MainBot.submit_goal`` — async callable(description, metadata) -> Goal.
+    introspection_brain:
+        Optional IntrospectionBrain — if provided, its briefing shapes goal generation.
     interval_seconds:
         How often to run the analysis loop (default 600s).
     """
@@ -99,6 +100,7 @@ class GoalGeneratorBrain:
         global_memory: GlobalMemory,
         llm_client: Any,
         submit_goal_fn: Callable[..., Coroutine],
+        introspection_brain: Any = None,
         interval_seconds: float = _LOOP_INTERVAL_S,
     ) -> None:
         self._bus            = event_bus
@@ -106,6 +108,7 @@ class GoalGeneratorBrain:
         self._global_memory  = global_memory
         self._llm            = llm_client
         self._submit         = submit_goal_fn
+        self._introspection  = introspection_brain
         self._interval       = interval_seconds
 
         # Skills Gigia has *seen* in candidate lists (may never have executed)
@@ -279,10 +282,25 @@ class GoalGeneratorBrain:
             user_msg += "\nFailure patterns:\n"
             for fp in observations["failure_patterns"][:3]:
                 user_msg += f"  • {fp['problem'][:80]} (success rate: {fp['success_rate']*100:.0f}%)\n"
+
+        # Inject IntrospectionBrain briefing if available
+        if self._introspection:
+            briefing = self._introspection.get_briefing()
+            if briefing:
+                focus = briefing.get("goal_generator_focus", "")
+                gaps  = briefing.get("capability_gaps", [])
+                bottleneck = briefing.get("top_bottleneck", "")
+                if focus:
+                    user_msg += f"\nIntelligence briefing — what to prioritise: {focus}\n"
+                if bottleneck:
+                    user_msg += f"Top bottleneck: {bottleneck}\n"
+                if gaps:
+                    user_msg += f"Capability gaps: {', '.join(str(g) for g in gaps[:3])}\n"
+
         user_msg += "\nGenerate 1-2 concrete goals. Return JSON only."
 
         try:
-            raw = await self._llm.chat(_SYSTEM, user_msg)
+            raw = await self._llm.complete(user_msg, system_prompt=_SYSTEM)
             # Strip markdown fences if present
             raw = raw.strip()
             if raw.startswith("```"):
