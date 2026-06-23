@@ -116,7 +116,8 @@ class SynthesisBrain:
                     cb = metadata["callback"]
                     result_url = cb.get("result_url", "")
                     token = cb.get("token", "")
-                    run_id = cb.get("run_id", goal_id)
+                    # run_id lives at metadata level, not inside callback
+                    run_id = metadata.get("run_id") or goal_id
                     if result_url:
                         self._pending[goal_id] = {
                             "result_url": result_url,
