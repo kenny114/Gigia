@@ -40,6 +40,12 @@ class SkillSubBot(SubBot):
     """
     Executes an almcp skill via the gateway's /api/brain/execute endpoint.
 
+    Staged skills (lifecycle status == "staged") are executed locally via the
+    VPS executor instead of the public gateway — they haven't been promoted to
+    the global almcp catalog yet, so the gateway wouldn't know about them.
+    The result is stamped with _staged_execution=True so ManagerBot can forward
+    that flag in the SKILL_EXECUTED event, which triggers promotion.
+
     One SkillSubBot instance per instruction; stateless beyond the config.
     """
 
@@ -50,6 +56,46 @@ class SkillSubBot(SubBot):
         run_id: str = p["run_id"]
         skill_slug: str = p["skill_slug"]
         args: dict = p.get("args") or {}
+
+        # ── Staged execution path ────────────────────────────────────────────
+        # Before calling the almcp gateway, check whether this slug is a
+        # staged (locally-generated) skill that hasn't been promoted yet.
+        try:
+            from giga_ai.skills.executor import get_db_path, get_skill_status, run_skill
+            _db_path = get_db_path()
+            if _db_path:
+                _status = await get_skill_status(_db_path, skill_slug)
+                if _status == "staged":
+                    self._logger.info(
+                        "SkillSubBot: running staged skill locally",
+                        extra={"slug": skill_slug, "task_id": instruction.task_id},
+                    )
+                    ok, result = await run_skill(_db_path, skill_slug, args, expected_status="staged")
+                    if ok:
+                        if isinstance(result, dict):
+                            return {
+                                **result,
+                                "_credits_charged": 0,
+                                "_skill_slug": skill_slug,
+                                "_staged_execution": True,
+                            }
+                        return {
+                            "result": result,
+                            "_credits_charged": 0,
+                            "_skill_slug": skill_slug,
+                            "_staged_execution": True,
+                        }
+                    raise HTTP5xxException(
+                        f"staged skill '{skill_slug}' execution failed: {str(result)[:200]}"
+                    )
+        except (HTTP5xxException, HTTP404Exception):
+            raise
+        except Exception as _exc:
+            self._logger.warning(
+                "SkillSubBot: staged check failed — falling through to gateway",
+                extra={"slug": skill_slug, "error": str(_exc)[:200]},
+            )
+        # ── End staged execution path ─────────────────────────────────────────
 
         payload = {
             "run_id": run_id,

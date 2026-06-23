@@ -144,7 +144,8 @@ class ManagerBot:
             # Notify SkillBrain after every SKILL task so it can learn
             if self.task.sub_bot_type == SubBotType.SKILL and results:
                 slug = self.task.skill_slug or self.task.metadata.get("skill_slug", "")
-                result_keys = list(results[0].data.keys()) if results else []
+                result_data = results[0].data if results else {}
+                result_keys = list(result_data.keys())
                 await self._bus.publish(
                     EventType.SKILL_EXECUTED,
                     payload={
@@ -154,7 +155,11 @@ class ManagerBot:
                         "goal_description": self.task.metadata.get("goal_description", self.task.title),
                         "result_keys": result_keys,
                         "success": True,
-                        "credits": results[0].data.get("credits_charged", 0),
+                        "credits": result_data.get("credits_charged", 0),
+                        # Staged flag: True when the skill ran locally via SkillSubBot's
+                        # staged execution path. SkillFactoryBrain uses this to decide
+                        # whether to promote the skill to active and register it in almcp.
+                        "staged": bool(result_data.get("_staged_execution", False)),
                     },
                     correlation_id=self.task.correlation_id,
                 )

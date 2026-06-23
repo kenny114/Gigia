@@ -138,6 +138,10 @@ class MainBot:
             gateway_url=self.config.gateway.base_url or "https://almcp.vercel.app",
             giga_secret=self.config.gateway.shared_secret,
         )
+        # Inject skill_factory into PlanningBrain AFTER it's created so
+        # PlanningBrain can await generate_and_stage() on capability gaps.
+        self.planning._skill_factory = self.skill_factory
+
         self.introspection = IntrospectionBrain(
             event_bus=self.bus,
             llm_client=self.llm,

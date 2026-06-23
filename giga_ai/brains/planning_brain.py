@@ -26,8 +26,9 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from giga_ai.messaging.event_bus import EventBus, EventType
 from giga_ai.messaging.message_schemas import (
@@ -41,7 +42,13 @@ from giga_ai.messaging.message_schemas import (
 from giga_ai.utils.llm_client import LLMClient
 from giga_ai.utils.logger import get_logger
 
+if TYPE_CHECKING:
+    from giga_ai.brains.skill_factory_brain import SkillFactoryBrain
+
 log = get_logger(__name__)
+
+# How long to wait for SkillFactoryBrain to generate + stage a new skill
+_SKILL_FACTORY_TIMEOUT_S = 90
 
 
 # ---------------------------------------------------------------------------
@@ -210,10 +217,17 @@ class PlanningBrain:
         Any ``LLMClient`` implementation (OpenAI or Mock).
     """
 
-    def __init__(self, event_bus: EventBus, llm_client: LLMClient, skill_brain=None) -> None:
+    def __init__(
+        self,
+        event_bus: EventBus,
+        llm_client: LLMClient,
+        skill_brain=None,
+        skill_factory: Optional["SkillFactoryBrain"] = None,
+    ) -> None:
         self._bus = event_bus
         self._llm = llm_client
-        self._skill_brain = skill_brain  # Optional[SkillBrain] — injected by MainBot
+        self._skill_brain    = skill_brain     # Optional[SkillBrain] — injected by MainBot
+        self._skill_factory  = skill_factory   # Optional[SkillFactoryBrain] — injected by MainBot
 
     # ------------------------------------------------------------------
     # Public API
@@ -321,10 +335,8 @@ class PlanningBrain:
 
         if not tasks:
             if skill_mode:
-                # No tasks planned despite being in skill mode — either the
-                # candidate list was empty or none of the available skills
-                # matched the goal. Signal SkillFactoryBrain so it can generate
-                # a new skill for this capability gap.
+                # No tasks planned despite being in skill mode: publish the gap
+                # event for observability, then try to auto-generate a skill.
                 await self._bus.publish(
                     EventType.SKILL_GAP_DETECTED,
                     payload={
@@ -334,7 +346,14 @@ class PlanningBrain:
                     },
                 )
 
-            # Fire GOAL_COMPLETED so SynthesisBrain delivers a result.
+                if self._skill_factory is not None:
+                    staged_tasks = await self._try_generate_staged_skill(
+                        goal, candidates, gateway_callback, context_str
+                    )
+                    if staged_tasks:
+                        return staged_tasks
+
+            # Fall-through: genuine failure — SynthesisBrain will deliver a result.
             await self._bus.publish(
                 EventType.GOAL_COMPLETED,
                 payload={
@@ -348,6 +367,111 @@ class PlanningBrain:
         for task in tasks:
             await self._emit_task_created(task)
 
+        return tasks
+
+    async def _try_generate_staged_skill(
+        self,
+        goal: Goal,
+        candidates: Optional[List[OrchestrateCandidate]],
+        gateway_callback: Optional[GatewayCallback],
+        context_str: str,
+    ) -> List[Task]:
+        """
+        Ask SkillFactoryBrain to generate + stage a new skill for this gap.
+        If staging succeeds, replan once using that skill as the only candidate.
+        Returns the resulting tasks, or [] if generation/replanning fails.
+        """
+        log.info("PlanningBrain: asking SkillFactoryBrain to fill capability gap",
+                 extra={"goal_id": goal.goal_id, "goal": goal.description[:80]})
+        try:
+            staged_slug = await asyncio.wait_for(
+                self._skill_factory.generate_and_stage(
+                    goal.description,
+                    len(candidates or []),
+                ),
+                timeout=_SKILL_FACTORY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning("PlanningBrain: SkillFactoryBrain timed out",
+                        extra={"goal_id": goal.goal_id,
+                               "timeout": _SKILL_FACTORY_TIMEOUT_S})
+            return []
+        except Exception as exc:
+            log.error("PlanningBrain: SkillFactoryBrain error",
+                      extra={"goal_id": goal.goal_id, "error": str(exc)})
+            return []
+
+        if not staged_slug:
+            log.info("PlanningBrain: SkillFactoryBrain returned no staged skill",
+                     extra={"goal_id": goal.goal_id})
+            return []
+
+        # Retrieve staged metadata to build a synthetic candidate
+        meta = await self._skill_factory.get_staged_metadata(staged_slug)
+        if not meta:
+            log.warning("PlanningBrain: staged metadata not found",
+                        extra={"slug": staged_slug})
+            return []
+
+        staged_candidate = OrchestrateCandidate(
+            slug=staged_slug,
+            name=meta.get("name", staged_slug.replace("_", " ").title()),
+            description=meta.get("description", f"Generated skill: {staged_slug}"),
+            credits=2,
+            tags=[],
+            best_used_when=f"When no existing skill can handle: {goal.description[:80]}",
+            avoid_when=None,
+            example_call=None,
+        )
+
+        log.info("PlanningBrain: replanning with staged skill",
+                 extra={"goal_id": goal.goal_id, "slug": staged_slug})
+
+        # Replan with just this single staged skill
+        candidate_dicts = [
+            {
+                "slug":          staged_candidate.slug,
+                "name":          staged_candidate.name,
+                "description":   staged_candidate.description,
+                "credit_cost":   staged_candidate.credits,
+                "best_used_when": staged_candidate.best_used_when or "",
+            }
+        ]
+        candidates_str = "\n".join(
+            f"  {c['slug']}: {c['name']} — {c['description']}" for c in candidate_dicts
+        )
+        prompt = _SKILL_DECOMPOSE_USER_TEMPLATE.format(
+            goal=goal.description,
+            candidates=candidates_str,
+            context=context_str,
+        )
+
+        try:
+            raw_response = await self._llm.complete(
+                prompt, system_prompt=_SKILL_DECOMPOSE_SYSTEM_PROMPT
+            )
+        except Exception as exc:
+            log.error("PlanningBrain: LLM replan with staged skill failed",
+                      extra={"error": str(exc)})
+            return []
+
+        tasks = self._parse_tasks(
+            raw_response,
+            goal.goal_id,
+            goal.correlation_id,
+            gateway_callback=gateway_callback,
+        )
+
+        if not tasks:
+            log.warning("PlanningBrain: staged skill replan produced no tasks",
+                        extra={"goal_id": goal.goal_id, "slug": staged_slug})
+            return []
+
+        log.info("PlanningBrain: replanned with staged skill",
+                 extra={"goal_id": goal.goal_id, "slug": staged_slug, "tasks": len(tasks)})
+
+        for task in tasks:
+            await self._emit_task_created(task)
         return tasks
 
     async def replan(

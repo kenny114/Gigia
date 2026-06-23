@@ -37,6 +37,7 @@ from giga_ai.skills.executor import (
     init_db as _executor_init_db,
     list_skills as _executor_list_skills,
     run_skill as _executor_run_skill,
+    set_db_path as _executor_set_db_path,
     store_skill as _executor_store_skill,
 )
 
@@ -146,8 +147,10 @@ async def lifespan(app: FastAPI):
     config = load_config()
     _DB_PATH = config.database.sqlite_path
 
-    # Ensure generated_skills table exists before the bot starts
+    # Ensure generated_skills table exists and expose the db path globally
+    # so SkillSubBot can reach the executor without threading db_path everywhere.
     await _executor_init_db(_DB_PATH)
+    _executor_set_db_path(_DB_PATH)
 
     _bot = MainBot(config=config)
     await _bot.start()
@@ -393,10 +396,23 @@ async def run_generated_skill(
     req: SkillRunRequest,
     x_giga_secret: Optional[str] = Header(None, alias="X-Giga-Secret"),
 ):
-    """almcp calls this to execute a generated skill by slug."""
+    """
+    almcp calls this to execute an active generated skill by slug.
+    Only active skills are runnable via this public endpoint (staged skills
+    are executed locally by SkillSubBot inside the VPS process).
+    """
     if not _check_secret(x_giga_secret):
         raise HTTPException(status_code=401, detail="Invalid X-Giga-Secret")
-    ok, result = await _executor_run_skill(_DB_PATH, slug, req.input_data or {})
+    from giga_ai.skills.executor import get_skill_status
+    status = await get_skill_status(_DB_PATH, slug)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"skill not found: {slug}")
+    if status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail=f"skill '{slug}' is {status}, not active — cannot execute via public endpoint",
+        )
+    ok, result = await _executor_run_skill(_DB_PATH, slug, req.input_data or {}, expected_status="active")
     if not ok:
         raise HTTPException(status_code=502, detail=str(result))
     return result
